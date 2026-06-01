@@ -1,10 +1,5 @@
 """
-GitHub Actions / 定时任务入口：
-1. 运行一手短期库存抓取、回推并生成 PDF/PNG 图表
-2. 与 data/baseline 对比
-3. 有变更 → 发邮件（仅附 PDF+PNG）
-4. 无变更 + 手动 Run → 仍发邮件（仅附 PDF+PNG）
-5. 无变更 + 每日定时 → 不发邮件
+GitHub Actions / 定时任务入口（版本标记: 2026-06-02-v2）
 """
 from __future__ import annotations
 
@@ -19,6 +14,8 @@ from notify_utils import (
     send_update_email,
     sync_baseline,
 )
+
+RUN_DAILY_VERSION = "2026-06-02-v2"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 BASELINE_DIR = PROJECT_DIR / "data" / "baseline"
@@ -36,19 +33,29 @@ def _load_inventory_module():
     return mod
 
 
-def _is_manual_run() -> bool:
-    return os.environ.get("GITHUB_EVENT_NAME", "").strip() == "workflow_dispatch"
+def _email_when_no_change() -> bool:
+    """手动 Run workflow 时，无数据变化也发邮件（附 PDF+PNG）。"""
+    if os.environ.get("SEND_EMAIL_IF_NO_CHANGE", "0").strip() == "1":
+        return True
+    if os.environ.get("GITHUB_EVENT_NAME", "").strip() == "workflow_dispatch":
+        return True
+    return False
 
 
 def main() -> int:
+    print(
+        f"[run_daily] version={RUN_DAILY_VERSION}  "
+        f"GITHUB_EVENT_NAME={os.environ.get('GITHUB_EVENT_NAME', '')!r}  "
+        f"FORCE_GENERATE_CHART={os.environ.get('FORCE_GENERATE_CHART', '')!r}  "
+        f"SEND_EMAIL_IF_NO_CHANGE={os.environ.get('SEND_EMAIL_IF_NO_CHANGE', '')!r}"
+    )
+
     if not SCRIPT.exists():
         raise FileNotFoundError(SCRIPT)
 
     seed_only = os.environ.get("SEED_BASELINE_ONLY", "0") == "1"
-    manual = _is_manual_run()
 
     mod = _load_inventory_module()
-    # CI/定时任务也生成图表，供邮件附件使用
     argv = [str(SCRIPT), "--out-dir", str(OUT_DIR)]
 
     old_argv = sys.argv
@@ -76,12 +83,12 @@ def main() -> int:
         (PROJECT_DIR / ".baseline_updated").write_text("1", encoding="utf-8")
         return 0
 
-    if manual:
-        print("数据无变化，但为手动 Run workflow，仍发送最新图表邮件…")
+    if _email_when_no_change():
+        print("数据无变化，但为手动 Run workflow，仍发送最新图表邮件（PDF+PNG）…")
         send_manual_report_email(OUT_DIR, repo_url=repo_url)
         return 0
 
-    print("数据无变化（定时任务），不发送邮件。")
+    print("数据无变化（每日定时任务），不发送邮件。")
     return 0
 
 

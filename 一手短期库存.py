@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import math
 import re
 import time
@@ -652,8 +653,14 @@ def main() -> None:
     ap.add_argument("--no-landreg-selenium", action="store_true")
     ap.add_argument("--selenium-visible", action="store_true", help="显示 Chrome（调试）")
     ap.add_argument("--dump-arcgis-fields", action="store_true")
-    ap.add_argument("--skip-chart", action="store_true", help="不生成图表（CI/定时任务用）")
+    ap.add_argument("--skip-chart", action="store_true", help="不生成图表（仅本地调试时用）")
     args = ap.parse_args()
+
+    # GitHub Actions：workflow 设 FORCE_GENERATE_CHART=1 时必定出图（供邮件附件）
+    if os.environ.get("FORCE_GENERATE_CHART", "0").strip() == "1":
+        args.skip_chart = False
+    elif os.environ.get("SKIP_CHART", "0").strip() == "1":
+        args.skip_chart = True
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

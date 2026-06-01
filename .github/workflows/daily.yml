@@ -38,6 +38,8 @@ jobs:
         id: run
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          FORCE_GENERATE_CHART: "1"
+          SEND_EMAIL_IF_NO_CHANGE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
