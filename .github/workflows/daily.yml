@@ -2,7 +2,7 @@ name: Daily inventory check
 
 on:
   schedule:
-    # UTC 01:30 ≈ 香港时间 09:30
+    # UTC 01:30 ≈ 香港时间 09:30，每天自动运行
     - cron: "30 1 * * *"
   workflow_dispatch:
 
@@ -25,6 +25,9 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      - name: Install Chinese fonts for chart
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+
       - name: Install Chrome
         uses: browser-actions/setup-chrome@v1
 
@@ -34,7 +37,7 @@ jobs:
       - name: Run pipeline and notify on change
         id: run
         env:
-          SKIP_CHART: "1"
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
