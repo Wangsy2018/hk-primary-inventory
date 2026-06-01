@@ -1,12 +1,15 @@
 """
-GitHub Actions / 定时任务入口（版本标记: 2026-06-02-v3-chart-fix）
+GitHub Actions / 定时任务入口（版本标记: 2026-06-02-v4-chart-email-fix）
 """
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 import sys
 from pathlib import Path
+
+import pandas as pd
 
 from notify_utils import (
     compare_with_baseline,
@@ -15,7 +18,7 @@ from notify_utils import (
     sync_baseline,
 )
 
-RUN_DAILY_VERSION = "2026-06-02-v3-chart-fix"
+RUN_DAILY_VERSION = "2026-06-02-v4-chart-email-fix"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 BASELINE_DIR = PROJECT_DIR / "data" / "baseline"
@@ -42,6 +45,25 @@ def _email_when_no_change() -> bool:
     return False
 
 
+def _regenerate_chart_from_output() -> None:
+    """用 out_inventory 里的 CSV 强制重绘，避免 importlib 加载到旧模块或漏画图。"""
+    sys.path.insert(0, str(PROJECT_DIR))
+    if "chart_report" in sys.modules:
+        importlib.reload(sys.modules["chart_report"])
+    import chart_report
+
+    inv_path = OUT_DIR / "instant_saleable_inventory_monthly.csv"
+    if not inv_path.exists():
+        raise FileNotFoundError(f"缺少库存 CSV，无法绘图: {inv_path}")
+    inv = pd.read_csv(inv_path, dtype={"month": str})
+    print(
+        f"[run_daily] 重绘图表: rows={len(inv)}  "
+        f"months={inv['month'].min()}~{inv['month'].max()}  "
+        f"chart_report={chart_report.__file__}"
+    )
+    chart_report.generate_report_chart(inv, OUT_DIR)
+
+
 def main() -> int:
     print(
         f"[run_daily] version={RUN_DAILY_VERSION}  "
@@ -55,6 +77,7 @@ def main() -> int:
 
     seed_only = os.environ.get("SEED_BASELINE_ONLY", "0") == "1"
 
+    sys.path.insert(0, str(PROJECT_DIR))
     mod = _load_inventory_module()
     argv = [str(SCRIPT), "--out-dir", str(OUT_DIR)]
 
@@ -65,10 +88,14 @@ def main() -> int:
     finally:
         sys.argv = old_argv
 
-    for chart_name in ("report_chart.png", "report_chart.pdf"):
+    _regenerate_chart_from_output()
+
+    for chart_name in ("report_chart.png", "report_chart.pdf", "report_chart.meta.txt"):
         chart_path = OUT_DIR / chart_name
         if chart_path.exists():
             print(f"[run_daily] 附件 {chart_name}: {chart_path.stat().st_size} bytes")
+            if chart_name == "report_chart.meta.txt":
+                print(chart_path.read_text(encoding="utf-8").strip())
         else:
             print(f"[run_daily] 警告: 未生成 {chart_path}")
 

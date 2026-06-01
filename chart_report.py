@@ -1,25 +1,27 @@
 """研报图表：与本地 Inventory with chart 版一致，并修复 Linux 中文字体。"""
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 PROJECT_DIR = Path(__file__).resolve().parent
-# 用于 Actions 日志 / 排查：旧版为 line-top-v1，当前为 bars-top-quarterly-v2
+# 旧版 GitHub 内嵌图：line-top-v1（上图折线、下图柱）。当前与 Inventory with chart 一致。
 CHART_LAYOUT_VERSION = "bars-top-quarterly-v2"
 
 
-def setup_chinese_font() -> str:
-    import matplotlib.font_manager as fm
-
+def setup_chinese_font() -> Optional[fm.FontProperties]:
+    """返回 FontProperties；Linux CI 必须用字体文件路径，不能只靠字体名。"""
     font_paths: list[Path] = []
     bundled = PROJECT_DIR / "assets" / "fonts" / "NotoSansSC-Regular.otf"
     if bundled.exists():
@@ -40,12 +42,13 @@ def setup_chinese_font() -> str:
     for path in font_paths:
         try:
             fm.fontManager.addfont(str(path))
-            name = fm.FontProperties(fname=str(path)).get_name()
+            prop = fm.FontProperties(fname=str(path))
+            name = prop.get_name()
             plt.rcParams["font.family"] = "sans-serif"
             plt.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
             plt.rcParams["axes.unicode_minus"] = False
             print(f"[图表] 使用字体: {name} ({path})")
-            return name
+            return prop
         except Exception as e:
             print(f"[图表] 字体加载失败 {path}: {e}")
 
@@ -62,12 +65,16 @@ def setup_chinese_font() -> str:
             plt.rcParams["font.sans-serif"] = [font, "DejaVu Sans"]
             plt.rcParams["axes.unicode_minus"] = False
             print(f"[图表] 使用中文字体: {font}")
-            return font
+            return fm.FontProperties(family=font)
 
     plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
     print("[图表] 警告: 未找到中文字体")
-    return "DejaVu Sans"
+    return None
+
+
+def _fp_kw(prop: Optional[fm.FontProperties]) -> dict:
+    return {"fontproperties": prop} if prop is not None else {}
 
 
 def prepare_chart_frame(inv_df: pd.DataFrame) -> pd.DataFrame:
@@ -101,9 +108,27 @@ def prepare_chart_frame(inv_df: pd.DataFrame) -> pd.DataFrame:
     return full
 
 
+def write_chart_meta(output_dir: Path, png_path: Path, month_count: int) -> Path:
+    meta_path = output_dir / "report_chart.meta.txt"
+    digest = hashlib.md5(png_path.read_bytes()).hexdigest() if png_path.exists() else ""
+    meta_path.write_text(
+        f"layout={CHART_LAYOUT_VERSION}\n"
+        f"months={month_count}\n"
+        f"png_md5={digest}\n"
+        f"png_bytes={png_path.stat().st_size if png_path.exists() else 0}\n",
+        encoding="utf-8",
+    )
+    return meta_path
+
+
 def generate_report_chart(inv_df: pd.DataFrame, output_dir: Path) -> None:
-    print(f"[图表] layout={CHART_LAYOUT_VERSION}  上图=批出/成交柱  下图=即时可售货量折线")
-    setup_chinese_font()
+    print(
+        f"[图表] module={Path(__file__).resolve()}  "
+        f"layout={CHART_LAYOUT_VERSION}  "
+        f"上图=批出/成交柱  下图=即时可售货量折线"
+    )
+    font_prop = setup_chinese_font()
+    fp = _fp_kw(font_prop)
     full = prepare_chart_frame(inv_df)
 
     chart_start = full["date"].min().date()
@@ -183,8 +208,8 @@ def generate_report_chart(inv_df: pd.DataFrame, output_dir: Path) -> None:
         pf = pk = False
 
     ax1.axhline(0, color="black", linewidth=0.8)
-    ax1.set_ylabel("单位数量（伙）", fontsize=12)
-    ax1.legend(loc="upper left", frameon=True, fontsize=9, markerscale=0.8)
+    ax1.set_ylabel("单位数量（伙）", fontsize=12, **fp)
+    ax1.legend(loc="upper left", frameon=True, fontsize=9, markerscale=0.8, prop=font_prop)
     ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, pos: f"{abs(int(x)):,}"))
     ax1.grid(axis="y", alpha=0.3, linestyle="--")
 
@@ -201,6 +226,7 @@ def generate_report_chart(inv_df: pd.DataFrame, output_dir: Path) -> None:
                 fontweight="bold",
                 color="#21618C",
                 bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#21618C", alpha=0.9),
+                **fp,
             )
     for y, total in annual_primary.items():
         if total:
@@ -214,6 +240,7 @@ def generate_report_chart(inv_df: pd.DataFrame, output_dir: Path) -> None:
                 fontweight="bold",
                 color="#922B21",
                 bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#922B21", alpha=0.9),
+                **fp,
             )
 
     valid_inv = full.dropna(subset=["instant_saleable_inventory"])
@@ -244,18 +271,22 @@ def generate_report_chart(inv_df: pd.DataFrame, output_dir: Path) -> None:
             fontsize=7,
             color="#C0392B",
             rotation=45,
+            **fp,
         )
 
-    ax2.set_ylabel("可售货量（伙）", fontsize=12)
+    ax2.set_ylabel("可售货量（伙）", fontsize=12, **fp)
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, pos: f"{int(x):,}"))
     ax2.grid(axis="y", alpha=0.3, linestyle="--")
 
     for ax in (ax1, ax2):
         ax.set_xticks(xtick_positions)
-        ax.set_xticklabels(xtick_labels, rotation=0, ha="center", fontsize=8.5)
+        ax.set_xticklabels(xtick_labels, rotation=0, ha="center", fontsize=8.5, **fp)
         for xi in full[full["month_num"] == 1]["x_idx"]:
             ax.axvline(xi, color="gray", linestyle="--", alpha=0.25, linewidth=0.6)
         ax.tick_params(axis="x", which="major", pad=12)
+        for label in ax.get_yticklabels():
+            if font_prop is not None:
+                label.set_fontproperties(font_prop)
 
     for x_pos, year_str in year_labels:
         ax2.text(
@@ -267,14 +298,33 @@ def generate_report_chart(inv_df: pd.DataFrame, output_dir: Path) -> None:
             va="top",
             fontsize=10,
             fontweight="bold",
+            color="black",
+            **fp,
         )
 
-    fig.suptitle("香港一手住宅市场：批出楼花、一手成交及即时可售货量", fontsize=16, fontweight="bold", y=0.97)
+    fig.suptitle(
+        "香港一手住宅市场：批出楼花、一手成交及即时可售货量",
+        fontsize=16,
+        fontweight="bold",
+        y=0.97,
+        **fp,
+    )
     ax1.set_title(
         f"数据范围：{chart_start.year}年{chart_start.month}月 — {chart_end.year}年{chart_end.month}月",
         fontsize=10,
         color="gray",
         pad=6,
+        **fp,
+    )
+    fig.text(
+        0.99,
+        0.01,
+        CHART_LAYOUT_VERSION,
+        ha="right",
+        va="bottom",
+        fontsize=6,
+        color="gray",
+        **fp,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -283,5 +333,7 @@ def generate_report_chart(inv_df: pd.DataFrame, output_dir: Path) -> None:
     fig.savefig(png_path, dpi=300, bbox_inches="tight")
     fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
+    meta = write_chart_meta(output_dir, png_path, len(full))
     print(f"[图表] 已导出: {png_path}")
     print(f"[图表] 已导出: {pdf_path}")
+    print(f"[图表] 元数据: {meta}")
