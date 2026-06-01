@@ -1,0 +1,58 @@
+name: Daily inventory check
+
+on:
+  schedule:
+    # UTC 01:30 ≈ 香港时间 09:30
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-and-notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline and notify on change
+        id: run
+        env:
+          SKIP_CHART: "1"
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python run_daily.py
+          if [ -f .baseline_updated ]; then
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit updated baseline
+        if: steps.run.outputs.updated == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/baseline/
+          git diff --staged --quiet || git commit -m "chore: update inventory baseline after data change"
+          git push
