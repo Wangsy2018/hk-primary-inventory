@@ -65,6 +65,13 @@ def main() -> int:
     finally:
         sys.argv = old_argv
 
+    for chart_name in ("report_chart.png", "report_chart.pdf"):
+        chart_path = OUT_DIR / chart_name
+        if chart_path.exists():
+            print(f"[run_daily] 附件 {chart_name}: {chart_path.stat().st_size} bytes")
+        else:
+            print(f"[run_daily] 警告: 未生成 {chart_path}")
+
     baseline_ready = (BASELINE_DIR / "instant_saleable_inventory_monthly.csv").exists()
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     repo_url = f"https://github.com/{repo}" if repo else ""

@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 
 PROJECT_DIR = Path(__file__).resolve().parent
+# 用于 Actions 日志 / 排查：旧版为 line-top-v1，当前为 bars-top-quarterly-v2
+CHART_LAYOUT_VERSION = "bars-top-quarterly-v2"
 
 
 def setup_chinese_font() -> str:
@@ -100,6 +102,7 @@ def prepare_chart_frame(inv_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_report_chart(inv_df: pd.DataFrame, output_dir: Path) -> None:
+    print(f"[图表] layout={CHART_LAYOUT_VERSION}  上图=批出/成交柱  下图=即时可售货量折线")
     setup_chinese_font()
     full = prepare_chart_frame(inv_df)
 
