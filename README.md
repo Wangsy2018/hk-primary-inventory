@@ -78,10 +78,17 @@ python run_daily.py
 | 文件 | 作用 |
 |------|------|
 | `一手短期库存.py` | 主程序（本地完整运行 + 图表） |
+| `chart_report.py` | 研报图表（季度/逐月横轴，与本地 `Inventory with chart.py` 一致；CI 用 Noto 字体路径加载） |
 | `run_daily.py` | 定时任务入口（对比 + 邮件） |
 | `notify_utils.py` | 数据 diff 与 SMTP 发信 |
 | `data/baseline/` | 上次确认的数据快照（提交到 Git） |
 | `.github/workflows/daily.yml` | GitHub Actions 定时任务 |
+
+## 图表与本地一致
+
+- 图表逻辑集中在 `chart_report.py`，与本地 `Inventory with chart.py` 的数据准备、季度/逐月横轴一致；仅开头连续为 0 的库存月不画线（与本地相同）。
+- Linux CI 通过 **字体文件路径** 注册 Noto CJK（`daily.yml` 会 `fc-cache` 并重建 matplotlib 字体缓存）。
+- 可选：将 `NotoSansSC-Regular.otf` 放入 `assets/fonts/`，本地与 GitHub 使用同一字体文件。
 
 ## 注意事项
 

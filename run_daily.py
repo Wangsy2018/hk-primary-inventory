@@ -1,5 +1,5 @@
 """
-GitHub Actions / 定时任务入口（版本标记: 2026-06-02-v2）
+GitHub Actions / 定时任务入口（版本标记: 2026-06-02-v3-chart-fix）
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from notify_utils import (
     sync_baseline,
 )
 
-RUN_DAILY_VERSION = "2026-06-02-v2"
+RUN_DAILY_VERSION = "2026-06-02-v3-chart-fix"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 BASELINE_DIR = PROJECT_DIR / "data" / "baseline"
