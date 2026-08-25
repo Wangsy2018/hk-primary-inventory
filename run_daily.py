@@ -94,15 +94,22 @@ def main() -> int:
     changes = compare_with_baseline(BASELINE_DIR, OUT_DIR)
 
     if changes:
-        print(f"检测到 {sum(len(c.rows) for c in changes)} 处变更，发送邮件（数据变更通知）…")
-        send_update_email(changes, OUT_DIR, repo_url=repo_url)
+        print(f"检测到 {sum(len(c.rows) for c in changes)} 处变更。")
+        # 邮件通知为可选：未配置 SMTP 时跳过，不影响数据与网页更新
+        try:
+            send_update_email(changes, OUT_DIR, repo_url=repo_url)
+        except Exception as e:
+            print(f"[run_daily] 更新邮件发送失败（已跳过，网页仍会更新）: {e}")
         sync_baseline(BASELINE_DIR, OUT_DIR)
         (PROJECT_DIR / ".baseline_updated").write_text("1", encoding="utf-8")
         return 0
 
     if _email_when_no_change():
-        print("数据无变化，但为手动 Run workflow，仍发送邮件（数据无变化通知）…")
-        send_manual_report_email(OUT_DIR, repo_url=repo_url)
+        print("数据无变化，但为手动运行，尝试发送邮件…")
+        try:
+            send_manual_report_email(OUT_DIR, repo_url=repo_url)
+        except Exception as e:
+            print(f"[run_daily] 邮件发送失败（已跳过）: {e}")
         return 0
 
     print("数据无变化（每日定时任务），不发送邮件。")
