@@ -63,6 +63,13 @@ def _regenerate_chart_from_output() -> None:
     )
     chart_report.generate_report_chart(inv, OUT_DIR)
 
+    # 生成交互式 HTML 看板（ECharts），供 GitHub Pages 网页版查看
+    if "chart_dashboard" in sys.modules:
+        importlib.reload(sys.modules["chart_dashboard"])
+    import chart_dashboard
+    chart_dashboard.generate(OUT_DIR)
+    print("[run_daily] 已生成 dashboard.html")
+
 
 def main() -> int:
     print(

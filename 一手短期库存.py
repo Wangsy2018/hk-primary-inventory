@@ -5,7 +5,7 @@ import os
 import math
 import re
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -470,7 +470,7 @@ def main() -> None:
         start = parse_month(args.start)
     else:
         start = date(anchor_d.year - 10, 1, 1)
-    end = parse_month(args.end) if args.end else anchor_d
+    end = parse_month(args.end) if args.end else date.today().replace(day=1)
 
     print(f"项目目录: {PROJECT_DIR}")
     print(f"输出目录: {out_dir}")
