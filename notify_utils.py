@@ -5,8 +5,6 @@ import os
 import smtplib
 import ssl
 from dataclasses import dataclass, field
-from email.mime.application import MIMEApplication
-from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -24,9 +22,6 @@ COLUMN_LABELS = {
     "primary_units": "一手成交伙数",
     "instant_saleable_inventory": "即时可售货量",
 }
-
-CHART_PNG = "report_chart.png"
-CHART_PDF = "report_chart.pdf"
 
 
 @dataclass
@@ -126,14 +121,14 @@ def _brief_summary(changes: list[FileChange], out_dir: Path) -> tuple[str, str]:
         f"共检测到 {n} 处数值变更。\n"
         f"{latest_line}\n"
         f"{meta_line}\n\n"
-        "请查看附件：研报图表 PDF 与 PNG。"
+        "请查看 GitHub Pages 网页版看板（含图表）。"
     )
     html = (
         "<h2>香港一手短期库存 — 数据已更新</h2>"
         f"<p>共检测到 <b>{n}</b> 处数值变更。</p>"
         f"<p>{latest_line}</p>"
         f"<p><small>{meta_line}</small></p>"
-        "<p>请查看附件：<b>report_chart.pdf</b>、<b>report_chart.png</b>。</p>"
+        "<p>请查看 GitHub Pages 网页版看板（含图表）。</p>"
     )
     return text, html
 
@@ -162,14 +157,14 @@ def _manual_no_change_summary(out_dir: Path) -> tuple[str, str]:
         "数据与上次记录一致，无新增变更。\n"
         f"{latest_line}\n"
         f"{meta_line}\n\n"
-        "请查看附件：最新研报图表 PDF 与 PNG。"
+        "请查看 GitHub Pages 网页版看板（含图表）。"
     )
     html = (
         "<h2>香港一手短期库存 — 手动检查</h2>"
         "<p>数据与上次记录<strong>一致</strong>，无新增变更。</p>"
         f"<p>{latest_line}</p>"
         f"<p><small>{meta_line}</small></p>"
-        "<p>请查看附件：<b>report_chart.pdf</b>、<b>report_chart.png</b>。</p>"
+        "<p>请查看 GitHub Pages 网页版看板（含图表）。</p>"
     )
     return text, html
 
@@ -182,7 +177,7 @@ def send_report_email(
     html_body: str,
     repo_url: str = "",
 ) -> None:
-    """发送邮件：正文简短说明 + 附件 PDF/PNG（不附 CSV/Excel）。"""
+    """发送邮件：正文简短说明（不再附 PDF/PNG 研报图，数据变更请看网页版看板）。"""
     host = os.environ.get("SMTP_HOST", "").strip()
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER", "").strip()
@@ -196,12 +191,6 @@ def send_report_email(
             "SMTP_FROM, NOTIFY_EMAIL_TO"
         )
 
-    png_path = out_dir / CHART_PNG
-    pdf_path = out_dir / CHART_PDF
-    if not png_path.exists() and not pdf_path.exists():
-        raise FileNotFoundError(
-            f"未找到图表文件：{png_path} 或 {pdf_path}。请确认已生成研报图（勿使用 --skip-chart）。"
-        )
 
     recipients = [x.strip() for x in to_raw.split(",") if x.strip()]
     if repo_url:
@@ -218,17 +207,6 @@ def send_report_email(
     alt.attach(MIMEText(html_body, "html", "utf-8"))
     msg.attach(alt)
 
-    if png_path.exists():
-        with open(png_path, "rb") as f:
-            img = MIMEImage(f.read(), _subtype="png")
-        img.add_header("Content-Disposition", "attachment", filename=CHART_PNG)
-        msg.attach(img)
-
-    if pdf_path.exists():
-        with open(pdf_path, "rb") as f:
-            pdf = MIMEApplication(f.read(), _subtype="pdf")
-        pdf.add_header("Content-Disposition", "attachment", filename=CHART_PDF)
-        msg.attach(pdf)
 
     context = ssl.create_default_context()
     if port == 465:
@@ -243,8 +221,8 @@ def send_report_email(
             server.login(user, password)
             server.sendmail(mail_from, recipients, msg.as_string())
 
-    attached = [p.name for p in (png_path, pdf_path) if p.exists()]
-    print(f"已发送邮件至: {', '.join(recipients)}，附件: {', '.join(attached)}")
+
+    print(f"已发送邮件至: {", ".join(recipients)}")
 
 
 def send_update_email(changes: list[FileChange], out_dir: Path, *, repo_url: str = "") -> None:

@@ -46,24 +46,8 @@ def _email_when_no_change() -> bool:
 
 
 def _regenerate_chart_from_output() -> None:
-    """用 out_inventory 里的 CSV 强制重绘，避免 importlib 加载到旧模块或漏画图。"""
+    """生成交互式 HTML 看板（ECharts），供 GitHub Pages 网页版查看。（已停用研报 PDF/PNG）"""
     sys.path.insert(0, str(PROJECT_DIR))
-    if "chart_report" in sys.modules:
-        importlib.reload(sys.modules["chart_report"])
-    import chart_report
-
-    inv_path = OUT_DIR / "instant_saleable_inventory_monthly.csv"
-    if not inv_path.exists():
-        raise FileNotFoundError(f"缺少库存 CSV，无法绘图: {inv_path}")
-    inv = pd.read_csv(inv_path, dtype={"month": str})
-    print(
-        f"[run_daily] 重绘图表: rows={len(inv)}  "
-        f"months={inv['month'].min()}~{inv['month'].max()}  "
-        f"chart_report={chart_report.__file__}"
-    )
-    chart_report.generate_report_chart(inv, OUT_DIR)
-
-    # 生成交互式 HTML 看板（ECharts），供 GitHub Pages 网页版查看
     if "chart_dashboard" in sys.modules:
         importlib.reload(sys.modules["chart_dashboard"])
     import chart_dashboard
@@ -97,14 +81,6 @@ def main() -> int:
 
     _regenerate_chart_from_output()
 
-    for chart_name in ("report_chart.png", "report_chart.pdf", "report_chart.meta.txt"):
-        chart_path = OUT_DIR / chart_name
-        if chart_path.exists():
-            print(f"[run_daily] 附件 {chart_name}: {chart_path.stat().st_size} bytes")
-            if chart_name == "report_chart.meta.txt":
-                print(chart_path.read_text(encoding="utf-8").strip())
-        else:
-            print(f"[run_daily] 警告: 未生成 {chart_path}")
 
     baseline_ready = (BASELINE_DIR / "instant_saleable_inventory_monthly.csv").exists()
     repo = os.environ.get("GITHUB_REPOSITORY", "")
@@ -118,14 +94,14 @@ def main() -> int:
     changes = compare_with_baseline(BASELINE_DIR, OUT_DIR)
 
     if changes:
-        print(f"检测到 {sum(len(c.rows) for c in changes)} 处变更，发送邮件（PDF+PNG）…")
+        print(f"检测到 {sum(len(c.rows) for c in changes)} 处变更，发送邮件（数据变更通知）…")
         send_update_email(changes, OUT_DIR, repo_url=repo_url)
         sync_baseline(BASELINE_DIR, OUT_DIR)
         (PROJECT_DIR / ".baseline_updated").write_text("1", encoding="utf-8")
         return 0
 
     if _email_when_no_change():
-        print("数据无变化，但为手动 Run workflow，仍发送最新图表邮件（PDF+PNG）…")
+        print("数据无变化，但为手动 Run workflow，仍发送邮件（数据无变化通知）…")
         send_manual_report_email(OUT_DIR, repo_url=repo_url)
         return 0
 
