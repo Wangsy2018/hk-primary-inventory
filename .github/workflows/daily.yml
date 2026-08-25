@@ -4,6 +4,10 @@ on:
   schedule:
     # UTC 01:30 ≈ 香港时间 09:30，每天自动运行
     - cron: "30 1 * * *"
+  # 改了代码 push 上来就重建网页，省得手动 Run 一次（用 GITHUB_TOKEN 的
+  # 机器人提交不会再触发 workflow，不会自我循环）
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
