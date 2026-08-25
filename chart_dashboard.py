@@ -439,6 +439,15 @@ def build_dashboard_html(dirpath: Path) -> str:
     annualChart.resize(); invChart.resize(); flowChart.resize();
     qChart.resize(); secondChart.resize();
   }});
+
+  // 标签页在手机上常常一开就是好几天。切回来且距上次加载超过 10 分钟就自己刷新，
+  // 免得看到的是几天前的数字。正在看图时不会打断（只在重新可见时触发）。
+  var loadedAt = Date.now();
+  document.addEventListener('visibilitychange', function(){{
+    if (!document.hidden && Date.now() - loadedAt > 10 * 60 * 1000) {{
+      location.reload();
+    }}
+  }});
 </script>
 </body>
 </html>
