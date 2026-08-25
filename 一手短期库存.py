@@ -191,15 +191,7 @@ def build_landreg_primary_monthly_via_selenium(
     from selenium.webdriver.support.ui import WebDriverWait
     from webdriver_manager.chrome import ChromeDriverManager
 
-    period_link_css = (
-        "body > main > div > div.page-banner__desc > div.past-content > "
-        "div:nth-child(1) > div:nth-child(4) > div > div > a"
-    )
-    expand_css = (
-        "body > main > div > div.page-banner__desc > div.past-content > "
-        "div:nth-child(1) > div:nth-child(4) > a > span"
-    )
-
+    # 年份段链接与页面结构每年会变：遍历页面全部链接，按「一手成交 agt-pri 系列」+「目标年份范围」过滤，不用固定 nth-child
     service = Service(ChromeDriverManager().install())
     options = webdriver.ChromeOptions()
     if headless:
@@ -212,44 +204,40 @@ def build_landreg_primary_monthly_via_selenium(
     driver.get(base_url)
 
     try:
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
     except Exception as e:
         driver.quit()
         raise RuntimeError(f"土地注册处页面加载超时: {e}")
+    _time.sleep(3)
 
-    try:
-        expand_button = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, expand_css))
-        )
-        driver.execute_script("arguments[0].scrollIntoView();", expand_button)
-        expand_button.click()
-        _time.sleep(3)
-    except Exception as e:
-        driver.quit()
-        raise RuntimeError(f"无法点击展开按钮: {e}")
-
-    try:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, period_link_css))
-        )
-    except Exception as e:
-        driver.quit()
-        raise RuntimeError(f"无法找到年份段链接: {e}")
-
-    periods: list[dict] = driver.execute_script(
-        """
-        const sel = arguments[0];
-        return Array.from(document.querySelectorAll(sel)).map(a => ({
+    link_rows = driver.execute_script(
+        r"""
+        const scope = document.querySelector('.past-content') || document;
+        return Array.from(scope.querySelectorAll('a')).map(a => ({
             text: (a.innerText || a.textContent || '').trim(),
             href: a.href || a.getAttribute('href') || ''
         }));
-        """,
-        period_link_css,
+        """
     )
+
+    periods = []
+    for row in link_rows:
+        href = (row.get("href") or "").strip()
+        if not href or "agt-pri" not in href:
+            # 只取「一手成交(primary)」系列：agt-pri-* / agt-primary
+            continue
+        parsed = parse_period_range(row.get("text") or "")
+        if parsed is None:
+            continue
+        s_year, e_year = parsed
+        # 只保留落在目标年份范围内的年份段（含相邻一年兜底，防止年份边界出入）
+        if e_year < start.year - 1 or s_year > end.year + 1:
+            continue
+        periods.append({"text": row.get("text"), "href": href})
 
     if not periods:
         driver.quit()
-        raise RuntimeError("年份段链接列表为空，请检查页面结构是否变更。")
+        raise RuntimeError("未找到一手成交年份段链接，请检查地政署页面结构是否有变。")
 
     pattern = re.compile(r"t([12])Y(\d+)r(\d+)_td(\d+)$")
     rows: dict[tuple[int, int], int] = {}
@@ -533,3 +521,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
