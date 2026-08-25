@@ -59,7 +59,6 @@ def main() -> int:
     print(
         f"[run_daily] version={RUN_DAILY_VERSION}  "
         f"GITHUB_EVENT_NAME={os.environ.get('GITHUB_EVENT_NAME', '')!r}  "
-        f"FORCE_GENERATE_CHART={os.environ.get('FORCE_GENERATE_CHART', '')!r}  "
         f"SEND_EMAIL_IF_NO_CHANGE={os.environ.get('SEND_EMAIL_IF_NO_CHANGE', '')!r}"
     )
 

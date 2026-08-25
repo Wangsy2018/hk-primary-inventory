@@ -15,11 +15,6 @@ from typing import Optional
 import pandas as pd
 import requests
 from dateutil.relativedelta import relativedelta
-import matplotlib
-
-matplotlib.use("Agg")
-
-from chart_report import generate_report_chart
 
 # ------------------------------------------------------------
 # 1. 原有下载、回推逻辑（完全保留）
@@ -684,9 +679,6 @@ def compute_inventory_by_anchor_backcast(
     return df
 
 
-# 图表逻辑见 chart_report.py（generate_report_chart）
-
-
 # ------------------------------------------------------------
 # 3. 主程序
 # ------------------------------------------------------------
@@ -703,16 +695,9 @@ def main() -> None:
                     help="禁用 Selenium 回退，只走 JSON 通道")
     ap.add_argument("--selenium-visible", action="store_true", help="显示 Chrome（调试）")
     ap.add_argument("--dump-arcgis-fields", action="store_true")
-    ap.add_argument("--skip-chart", action="store_true", help="不生成图表（仅本地调试时用）")
     ap.add_argument("--pending-backfill", action="store_true",
                     help="重抓区间内全部月份的待批预售楼花 PDF（首次建历史时用）")
     args = ap.parse_args()
-
-    # GitHub Actions：workflow 设 FORCE_GENERATE_CHART=1 时必定出图（供邮件附件）
-    if os.environ.get("FORCE_GENERATE_CHART", "0").strip() == "1":
-        args.skip_chart = False
-    elif os.environ.get("SKIP_CHART", "0").strip() == "1":
-        args.skip_chart = True
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -742,18 +727,18 @@ def main() -> None:
     print(f"锚点: {args.anchor_month} = {args.anchor_inventory}")
     print()
 
-    print("[1/5] 正在下载政府 ArcGIS 预售批出伙数 …")
+    print("[1/4] 正在下载政府 ArcGIS 预售批出伙数 …")
     approvals = build_presale_approvals_monthly(start=start, end=end)
     approvals.to_csv(out_dir / "presale_approvals_monthly.csv", index=False, encoding="utf-8-sig")
 
     if args.landreg_primary_csv:
-        print("[2/5] 读取本地一手成交 CSV …")
+        print("[2/4] 读取本地一手成交 CSV …")
         sales = pd.read_csv(args.landreg_primary_csv, dtype={"month": str})
         months = [month_str(d) for d in month_range_inclusive(start, end)]
         sales = pd.DataFrame({"month": months}).merge(sales, on="month", how="left")
         sales["primary_units"] = sales["primary_units"].fillna(0).astype(int)
     else:
-        print("[2/5] 正在获取土地注册处一手成交（含二手）…")
+        print("[2/4] 正在获取土地注册处一手成交（含二手）…")
         sales = build_landreg_primary_monthly(
             start=start,
             end=end,
@@ -764,7 +749,7 @@ def main() -> None:
     sales.to_csv(out_dir / "landreg_primary_monthly.csv", index=False, encoding="utf-8-sig")
 
     # 这两个是看板的补充序列，任何一个挂掉都不该拖垮主流程
-    print("[3/5] 正在获取待批预售楼花与中原城市领先指数 …")
+    print("[3/4] 正在获取待批预售楼花与中原城市领先指数 …")
     try:
         pending = build_pending_presale_monthly(
             start, end, PENDING_HISTORY_CSV, backfill=args.pending_backfill
@@ -778,7 +763,7 @@ def main() -> None:
     except Exception as e:
         print(f"  [CCL] 获取失败，本次跳过: {e}")
 
-    print("[4/5] 计算即时可售货量 …")
+    print("[4/4] 计算即时可售货量 …")
     inv = compute_inventory_by_anchor_backcast(
         approvals, sales, args.anchor_month, args.anchor_inventory
     )
@@ -800,15 +785,6 @@ def main() -> None:
     print()
     print("完成！")
     print(f"  Excel: {xlsx}")
-
-    if args.skip_chart:
-        print("已跳过图表生成（--skip-chart）。")
-        return
-
-    # ----- 生成投行级图表（不含待批）-----
-    print("\n[5/5] 正在生成研报图表 …")
-    generate_report_chart(inv, out_dir)  # 不再传递 pending_df
-    print("图表生成完毕。")
 
 
 if __name__ == "__main__":

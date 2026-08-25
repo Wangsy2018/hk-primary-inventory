@@ -119,29 +119,19 @@ def _brief_summary(changes: list[FileChange], out_dir: Path) -> tuple[str, str]:
                 f"{int(last['instant_saleable_inventory']):,} 伙。"
             )
 
-    meta_line = _chart_meta_line(out_dir)
     text = (
         "香港一手短期库存数据已更新。\n\n"
         f"共检测到 {n} 处数值变更。\n"
         f"{latest_line}\n"
-        f"{meta_line}\n\n"
         "请查看 GitHub Pages 网页版看板（含图表）。"
     )
     html = (
         "<h2>香港一手短期库存 — 数据已更新</h2>"
         f"<p>共检测到 <b>{n}</b> 处数值变更。</p>"
         f"<p>{latest_line}</p>"
-        f"<p><small>{meta_line}</small></p>"
         "<p>请查看 GitHub Pages 网页版看板（含图表）。</p>"
     )
     return text, html
-
-
-def _chart_meta_line(out_dir: Path) -> str:
-    meta_path = out_dir / "report_chart.meta.txt"
-    if not meta_path.exists():
-        return "图表版本：未生成 meta（可能是旧代码）。"
-    return "图表版本：" + meta_path.read_text(encoding="utf-8").strip().replace("\n", " | ")
 
 
 def _manual_no_change_summary(out_dir: Path) -> tuple[str, str]:
@@ -155,19 +145,16 @@ def _manual_no_change_summary(out_dir: Path) -> tuple[str, str]:
                 f"最新月份 {last['month']}，即时可售货量 "
                 f"{int(last['instant_saleable_inventory']):,} 伙。"
             )
-    meta_line = _chart_meta_line(out_dir)
     text = (
         "本次为 GitHub 手动运行。\n"
         "数据与上次记录一致，无新增变更。\n"
         f"{latest_line}\n"
-        f"{meta_line}\n\n"
         "请查看 GitHub Pages 网页版看板（含图表）。"
     )
     html = (
         "<h2>香港一手短期库存 — 手动检查</h2>"
         "<p>数据与上次记录<strong>一致</strong>，无新增变更。</p>"
         f"<p>{latest_line}</p>"
-        f"<p><small>{meta_line}</small></p>"
         "<p>请查看 GitHub Pages 网页版看板（含图表）。</p>"
     )
     return text, html

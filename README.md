@@ -22,9 +22,10 @@ pip install -r requirements.txt
 python 一手短期库存.py
 ```
 
-结果在 `out_inventory/`（含 Excel 与图表），整轮约 3 秒。
+输出在 `out_inventory/`：四份 CSV + 汇总 Excel。再跑 `python chart_dashboard.py`
+生成 `dashboard.html`（双击即可本地预览，ECharts 走本地 `assets/`）。整轮约 7 秒。
 
-> **本地开了代理（Clash / VPN）？** 港府两个数据源（`portal.csdi.gov.hk`、`www.landreg.gov.hk`）经代理常连不通。
+> **本地开了代理（Clash / VPN）？** 港府数据源（`portal.csdi.gov.hk`、`www.landreg.gov.hk`、`www.landsd.gov.hk`）经代理常连不通。
 > 脚本会在代理失败时自动绕过代理直连重试，无需手动关代理。
 
 ## 部署到 GitHub + 每日自动运行
@@ -122,21 +123,14 @@ python chart_dashboard.py
 
 | 文件 | 作用 |
 |------|------|
-| `一手短期库存.py` | 主程序（本地完整运行 + 图表）；抓数优先 JSON 通道，失败回退 Selenium |
-| `chart_report.py` | 研报图表（季度/逐月横轴，与本地 `Inventory with chart.py` 一致；CI 用 Noto 字体路径加载） |
-| `chart_dashboard.py` | 生成交互式 HTML 看板（ECharts），供本地 / GitHub Pages 查看 |
+| `一手短期库存.py` | 主程序：抓四个数据源 + 锚点回推，输出 CSV/Excel |
+| `chart_dashboard.py` | 生成交互式 HTML 看板（ECharts），本地 / GitHub Pages 共用；**唯一的图表产物** |
 | `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
 | `notify_utils.py` | 数据 diff 与 SMTP 发信 |
 | `data/baseline/` | 上次确认的数据快照（提交到 Git），用于判断「是否有更新」 |
 | `data/history/` | 待批预售楼花的逐月历史（提交到 Git），避免每天重下 100+ 份 PDF |
 | `assets/echarts.min.js` | 内嵌的 ECharts 库（网页版离线可用） |
 | `.github/workflows/daily.yml` | GitHub Actions 定时任务 |
-
-## 图表与本地一致
-
-- 图表逻辑集中在 `chart_report.py`，与本地 `Inventory with chart.py` 的数据准备、季度/逐月横轴一致；仅开头连续为 0 的库存月不画线（与本地相同）。
-- Linux CI 通过 **字体文件路径** 注册 Noto CJK（`daily.yml` 会 `fc-cache` 并重建 matplotlib 字体缓存）。
-- 可选：将 `NotoSansSC-Regular.otf` 放入 `assets/fonts/`，本地与 GitHub 使用同一字体文件。
 
 ## 数据源与抓取方式
 

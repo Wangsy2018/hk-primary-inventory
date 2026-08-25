@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """交互式 HTML 看板：读取 out_inventory 下的 CSV，用 ECharts 渲染离线可双击打开的 dashboard.html。
 
-保留原 matplotlib 静态图（report_chart.png/pdf），本脚本额外新增一个交互看板。
+这是唯一的图表产物；早先的 matplotlib 静态研报（report_chart.png/pdf）已移除。
 输出: out_inventory/dashboard.html
 """
 from __future__ import annotations
@@ -256,7 +256,7 @@ def build_dashboard_html(dirpath: Path) -> str:
     </div>
 
     <div class="chart-card">
-      <h2>二手成交 vs 中原城市领先指数 CCL（月度 · 柱为成交伙数，线为月末 CCL）</h2>
+      <h2>中原城市领先指数 CCL 与二手成交（月度 · 上下分区共用横轴，默认近 3 年）</h2>
       <div id="chart-second" class="chart"></div>
     </div>
   </div>
@@ -395,12 +395,15 @@ def build_dashboard_html(dirpath: Path) -> str:
   }});
   qChart.setOption(butterfly(D.q_keys, D.q_presale, D.q_primary, qAnnualText, 45));
 
-  // ---------- 二手成交（柱） vs 中原城市领先指数 CCL（线，右轴） ----------
+  // ---------- 上下分区：上 CCL 折线、下 二手成交柱，共用月份横轴 ----------
+  // 两者量纲差三个数量级（指数 ~150 vs 伙数 ~5000），叠在左右轴上互相压扁，
+  // 所以拆成上下两个 grid，只共享 x 轴。
   var secondChart = echarts.init(document.getElementById('chart-second'));
+  var secondXAxis = {{ type: 'category', data: D.months, boundaryGap: false }};
   secondChart.setOption({{
     tooltip: {{
       trigger: 'axis',
-      axisPointer: {{ type: 'cross' }},
+      axisPointer: {{ type: 'cross', link: [{{ xAxisIndex: 'all' }}] }},
       formatter: function(ps) {{
         var s = ps[0].axisValue + '<br/>';
         ps.forEach(function(p){{
@@ -411,26 +414,39 @@ def build_dashboard_html(dirpath: Path) -> str:
         return s;
       }}
     }},
-    legend: {{ data: ['二手成交', 'CCL'], top: 0 }},
-    grid: {{ left: 60, right: 60, top: 40, bottom: 40 }},
-    xAxis: {{ type: 'category', data: D.months, axisLabel: {{ rotate: 45 }} }},
+    legend: {{ data: ['CCL', '二手成交'], top: 0 }},
+    axisPointer: {{ link: [{{ xAxisIndex: 'all' }}] }},
+    grid: [
+      {{ left: 60, right: 40, top: 34, height: '34%' }},
+      {{ left: 60, right: 40, top: '56%', height: '30%' }}
+    ],
+    xAxis: [
+      Object.assign({{}}, secondXAxis, {{ gridIndex: 0, axisLabel: {{ show: false }}, axisTick: {{ show: false }} }}),
+      Object.assign({{}}, secondXAxis, {{ gridIndex: 1, boundaryGap: true, axisLabel: {{ rotate: 45, fontSize: 10 }} }})
+    ],
     yAxis: [
-      {{ type: 'value', name: '伙', nameGap: 16 }},
-      {{ type: 'value', name: 'CCL', nameGap: 16, scale: true, splitLine: {{ show: false }} }}
+      // scale:true —— 指数在 127~190 之间，从 0 起画会压成一条平线
+      {{ type: 'value', name: 'CCL', nameGap: 16, gridIndex: 0, scale: true,
+         splitLine: {{ lineStyle: {{ type: 'dashed' }} }} }},
+      {{ type: 'value', name: '二手成交（伙）', nameGap: 16, gridIndex: 1,
+         splitLine: {{ lineStyle: {{ type: 'dashed' }} }} }}
     ],
     dataZoom: [
-      {{ type: 'inside', start: zoomStart, end: 100 }},
-      {{ type: 'slider', height: 18, bottom: 4, start: zoomStart, end: 100 }}
+      {{ type: 'inside', xAxisIndex: [0, 1], start: zoomStart, end: 100 }},
+      {{ type: 'slider', xAxisIndex: [0, 1], height: 16, bottom: 4, start: zoomStart, end: 100 }}
     ],
     series: [
       {{
-        name: '二手成交', type: 'bar', yAxisIndex: 0, data: D.secondary,
-        itemStyle: {{ color: '#7f7fd5' }}, barMaxWidth: 18
+        name: 'CCL', type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: D.ccl,
+        smooth: true, connectNulls: false, symbol: 'none',
+        lineStyle: {{ width: 2.5, color: '#c0392b' }}, itemStyle: {{ color: '#c0392b' }},
+        areaStyle: {{ color: new echarts.graphic.LinearGradient(0,0,0,1,[
+          {{offset:0,color:'rgba(192,57,43,0.18)'}},{{offset:1,color:'rgba(192,57,43,0.01)'}}
+        ]) }}
       }},
       {{
-        name: 'CCL', type: 'line', yAxisIndex: 1, data: D.ccl, smooth: true,
-        connectNulls: false, symbol: 'none',
-        lineStyle: {{ width: 2.5, color: '#c0392b' }}, itemStyle: {{ color: '#c0392b' }}
+        name: '二手成交', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: D.secondary,
+        itemStyle: {{ color: '#7f7fd5' }}, barMaxWidth: 14
       }}
     ]
   }});
