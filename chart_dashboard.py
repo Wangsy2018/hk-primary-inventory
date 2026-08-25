@@ -342,28 +342,31 @@ def build_dashboard_html(dirpath: Path) -> str:
     return html
 
 
-def main() -> None:
-    import argparse
+def generate(out_dir: Path) -> Path:
+    """生成 dashboard.html 到 out_dir（自动复制本地 echarts 保证离线可用）。"""
     import shutil
 
-    ap = argparse.ArgumentParser(description="生成香港一手市场交互式 HTML 看板")
-    ap.add_argument("--out-dir", type=str, default=str(DEFAULT_OUT_DIR))
-    args = ap.parse_args()
-
-    out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 把本地 echarts 复制到输出目录的 assets/ 下，保证 HTML 自包含、可离线打开
     assets_dir = out_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     if ECHARTS_LOCAL.exists():
         shutil.copy2(ECHARTS_LOCAL, assets_dir / "echarts.min.js")
-        print(f"[看板] 已复制 echarts: {assets_dir / 'echarts.min.js'}")
 
     html = build_dashboard_html(out_dir)
     target = out_dir / "dashboard.html"
     target.write_text(html, encoding="utf-8")
     print(f"[看板] 已生成: {target}")
+    return target
+
+
+def main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="生成香港一手市场交互式 HTML 看板")
+    ap.add_argument("--out-dir", type=str, default=str(DEFAULT_OUT_DIR))
+    args = ap.parse_args()
+    generate(Path(args.out_dir))
 
 
 if __name__ == "__main__":

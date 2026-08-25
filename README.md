@@ -73,15 +73,47 @@ set NOTIFY_EMAIL_TO=收件人@example.com
 python run_daily.py
 ```
 
+## 网页版看板（GitHub Pages）
+
+除定时邮件外，可把交互式 **HTML 看板**（ECharts：年度对照 / 可售货量走势 / 月度上下轴 / 季度上下轴）发布到 GitHub Pages，随时在浏览器查看，并每日自动更新。
+
+### 网页版会自动发布
+
+`.github/workflows/daily.yml` 每次运行（每日定时或手动 Run workflow 都会）：
+1. 跑数据 pipeline 并生成 `out_inventory/dashboard.html`
+2. 包装为 `pages_build/index.html`，连同 `assets/echarts.min.js`
+3. 用 `actions/upload-pages-artifact` + `actions/deploy-pages` 部署到 GitHub Pages
+
+因此**只需一次性开启 GitHub Pages**，之后每次运行都会自动刷新网页版。
+
+### 一次性开启步骤
+
+1. 确认 `assets/echarts.min.js`（约 1 MB）已提交进仓库 —— 网页版完全自包含，无需联网加载 CDN。若尚未提交则一起 `git add assets/echarts.min.js`。
+2. 仓库 → **Settings** → **Pages**
+3. **Build and deployment** → **Source** 选择 **GitHub Actions**
+4. 在 **Actions** 页手动运行一次 **Daily inventory check & deploy dashboard**
+5. 部署成功后，deploy job 日志里有 `page_url`，通常为：
+   `https://<你的用户名>.github.io/<仓库名>/`
+
+### 本地预览网页版
+
+```bash
+python 一手短期库存.py
+python chart_dashboard.py
+# 双击 out_inventory/dashboard.html 即可预览（echarts 走本地 assets/）
+```
+
 ## 文件说明
 
 | 文件 | 作用 |
 |------|------|
 | `一手短期库存.py` | 主程序（本地完整运行 + 图表） |
 | `chart_report.py` | 研报图表（季度/逐月横轴，与本地 `Inventory with chart.py` 一致；CI 用 Noto 字体路径加载） |
-| `run_daily.py` | 定时任务入口（对比 + 邮件） |
+| `chart_dashboard.py` | 生成交互式 HTML 看板（ECharts），供本地 / GitHub Pages 查看 |
+| `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
 | `notify_utils.py` | 数据 diff 与 SMTP 发信 |
 | `data/baseline/` | 上次确认的数据快照（提交到 Git） |
+| `assets/echarts.min.js` | 内嵌的 ECharts 库（网页版离线可用） |
 | `.github/workflows/daily.yml` | GitHub Actions 定时任务 |
 
 ## 图表与本地一致
