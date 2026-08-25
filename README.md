@@ -116,7 +116,7 @@ python chart_dashboard.py
 | `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
 | `notify_utils.py` | 数据 diff 与 SMTP 发信 |
 | `data/baseline/` | 上次确认的数据快照（提交到 Git），用于判断「是否有更新」 |
-| `data/history/` | 待批预售楼花的逐月累积历史（提交到 Git），**丢了补不回来** |
+| `data/history/` | 待批预售楼花的逐月历史（提交到 Git），避免每天重下 100+ 份 PDF |
 | `assets/echarts.min.js` | 内嵌的 ECharts 库（网页版离线可用） |
 | `.github/workflows/daily.yml` | GitHub Actions 定时任务 |
 
@@ -133,12 +133,18 @@ python chart_dashboard.py
 | 预售批出伙数 | CSDI ArcGIS `LAO_PCRD` 图层 | 全历史 |
 | 一手 / 二手成交伙数 | 土地注册处 `/json/monthly_agt-pri/<年份段>/t1.json` | 2002-01 起 |
 | 中原城市领先指数 CCL | `hk.centanet.com/CCI/api/Index/CCLChart`，周度取每月最后一个观测 | 1993-12 起 |
-| 待批预售楼花单位数 | CSDI `LAO_PCRDP` 下载包（CSV/GeoJSON 同一份数据） | **只有当前快照** |
+| 待批预售楼花单位数 | 地政总署预售同意书月报 `t2_YYMM.pdf` 末页 Summary | 2013-01 起（月末时点） |
 
-> **待批预售楼花没有历史。** ArcGIS 图层 `supportsQueryWithHistoricMoment=false`、`startArchivingMoment=-1`，
-> data.gov.hk 也未收录该 URL，所以任何过去月份的存量都无从回溯。
-> 每次运行把当月这一格刷成最新快照并追加进 `data/history/pending_presale_monthly.csv`，
-> 这条线会从启用之日起逐月长出来 —— 这份文件必须提交进仓库，否则历史就断了。
+> **待批预售楼花用的是地政总署按月归档的 PDF**，不是 CSDI 那个下载包。
+> CSDI 的 `LAO_PCRDP` 只有当前快照（`supportsQueryWithHistoricMoment=false`、data.gov.hk 未收录），
+> 而地政总署每月发一份「截至该月月底待批预售楼花同意书」的 PDF，索引页回溯到 2013-01。
+> 两者在 2026-07 对得上（同为 32 个申请 / 13,734 伙），但只有 PDF 有历史。
+>
+> 取的是 PDF 末页 Summary 里的合计，不解析表格。用**英文版**：中文版 2016/2017 的措辞与现在不同，
+> 英文版十年来只把 `units pending approval` 换成过 `units involved`，一个正则兼容两种。
+> 抓过的月份落盘在 `data/history/pending_presale_monthly.csv` 并提交进仓库，
+> 日常运行只补缺失月份 + 重抓最近 2 个月（防事后修订）；
+> `python 一手短期库存.py --pending-backfill` 可重建全部历史。
 
 变更通知只看 `data/baseline/` 里的三个核心文件（批出 / 成交 / 回推库存）。
 CCL 每周都动、待批随时在变，两者只进看板不触发邮件，避免天天收到通知。

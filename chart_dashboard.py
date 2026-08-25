@@ -148,6 +148,19 @@ def build_dashboard_html(dirpath: Path) -> str:
     eff_presale = presale_vals[eff_index]
     eff_primary = primary_vals[eff_index]
 
+    # 月末那几个月官方还没发布，CSV 里补的是 0。画成 0 会变成一根假的零高柱、
+    # 以及一段假的库存平台，所以画图时截断成 null（CCL / 待批各自有真实覆盖，不动）。
+    data_end = len(months) - 1
+    while data_end >= 0 and not (
+        presale_vals[data_end] or primary_vals[data_end] or secondary_vals[data_end]
+    ):
+        data_end -= 1
+    for i in range(data_end + 1, len(months)):
+        presale_vals[i] = None
+        primary_vals[i] = None
+        secondary_vals[i] = None
+        inv_vals[i] = None
+
     from datetime import datetime
     last_update = datetime.now().strftime("%Y-%m-%d %H:%M")
 

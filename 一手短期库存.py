@@ -40,12 +40,21 @@ LANDREG_JSON_DIR = f"{LANDREG_BASE}/json/monthly_agt-pri"
 LANDREG_PRIMARY_KEY = "Number of Primary Sales for ASP Residential Building Units"
 LANDREG_SECONDARY_KEY = "Number of Secondary Sales for ASP Residential Building Units"
 
-# 待批预售楼花同意书（住宅）：只有当前快照，没有历史，见 update_pending_history()
-PENDING_CSV_URL = (
-    "https://static.csdi.gov.hk/csdi-webpage/download/"
-    "c84ee393122e5442985d6ce1cdddd162/csv"
+# 待批预售楼花同意书（住宅）：地政总署按月归档，每月一份 PDF，末页「Summary」有合计。
+# 用英文版：中文版 2016/2017 的措辞和现在不一样，英文版十年来只换过一个词。
+LANDSD_CONSENT_INDEX = (
+    "https://www.landsd.gov.hk/en/resources/land-info-stat/"
+    "dev-control-compliance/consent/presale.html"
 )
-PENDING_UNITS_FIELD = "NSEARCH11_EN"
+LANDSD_PENDING_PDF = "https://www.landsd.gov.hk/doc/en/consent/monthly/t2_{yymm}.pdf"
+# 2018 起: "... applications pending approval : N" + "... units involved : M"
+# 2016-17: "... pending approval : N"              + "... units pending approval : M"
+PENDING_SUMMARY_RE = re.compile(
+    r"Total no\. of Pre-?sale Consent \(Residential\)(?: applications)? pending approval"
+    r"\s*:\s*([\d,]+)\s*"
+    r"Total no\. of residential units (?:involved|pending approval)\s*:\s*([\d,]+)",
+    re.I,
+)
 
 # 中原城市领先指数 CCL：周度，1993-12 至今
 CCL_CHART_URL = "https://hk.centanet.com/CCI/api/Index/CCLChart"
@@ -53,7 +62,7 @@ CCL_REFERER = "https://hk.centanet.com/CCI/index"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR = PROJECT_DIR / "out_inventory"
-# 待批预售楼花没有历史，只能逐月累积；这份要提交进仓库才不会丢
+# 待批预售楼花逐月历史：每月一份 PDF，抓一次就落盘，提交进仓库避免重复下载
 PENDING_HISTORY_CSV = PROJECT_DIR / "data" / "history" / "pending_presale_monthly.csv"
 
 
@@ -516,68 +525,102 @@ def build_landreg_primary_monthly_via_selenium(
 #     return out
 
 
-def fetch_pending_presale_snapshot() -> tuple[date, int]:
-    """待批预售楼花同意书的住宅单位总数。
+def fetch_pending_available_months(s: requests.Session) -> list[str]:
+    """地政总署预售同意书索引页列出的全部月份，形如 ["2013-01", …]。"""
+    html = _http_get(s, LANDSD_CONSENT_INDEX, timeout=60).text
+    yms = sorted(set(re.findall(r"consent/presale/(\d{4})(\d{2})\.html", html)))
+    return [f"{y}-{m}" for y, m in yms]
 
-    数据源是一个 zip（内含单个 CSV），且**只有当前快照、没有任何历史**
-    （ArcGIS 图层 supportsQueryWithHistoricMoment=false，data.gov.hk 也未存档）。
-    所以历史只能靠 update_pending_history() 逐月累积。
-    返回 (快照日期, 单位总数)。
+
+def fetch_pending_month(s: requests.Session, ym: str) -> tuple[int, int] | None:
+    """某个月的待批预售楼花（住宅）：返回 (申请数, 住宅单位数)，取不到返回 None。
+
+    合计写在 PDF 末页的 Summary 里，不必解析表格。
     """
-    s = _requests_session(referer="https://portal.csdi.gov.hk/geoportal/")
-    r = _http_get(s, PENDING_CSV_URL, timeout=120)
-    r.raise_for_status()
+    import pdfplumber
 
-    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-        names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        if not names:
-            raise RuntimeError(f"待批预售楼花压缩包里没有 CSV: {zf.namelist()}")
-        name = names[0]
-        with zf.open(name) as fh:
-            df = pd.read_csv(fh)
-
-    if PENDING_UNITS_FIELD not in df.columns:
-        raise RuntimeError(
-            f"待批数据缺字段 {PENDING_UNITS_FIELD}，实际字段: {list(df.columns)[:20]}"
-        )
-    units = int(pd.to_numeric(df[PENDING_UNITS_FIELD], errors="coerce").fillna(0).sum())
-
-    # 文件名形如 LAO_PCRDP_20260816_gdb_..._converted.csv，日期即快照日
-    m = re.search(r"_(\d{8})_", name)
-    snap = (
-        date(int(m.group(1)[:4]), int(m.group(1)[4:6]), int(m.group(1)[6:8]))
-        if m
-        else date.today()
-    )
-    print(f"  待批预售楼花: {len(df)} 个项目, {units:,} 伙（快照日 {snap.isoformat()}）")
-    return snap, units
+    yymm = ym[2:4] + ym[5:7]
+    r = s.get(LANDSD_PENDING_PDF.format(yymm=yymm), timeout=120)
+    if r.status_code != 200:
+        return None
+    with pdfplumber.open(io.BytesIO(r.content)) as pdf:
+        # Summary 固定在最后一两页
+        text = "\n".join((pg.extract_text() or "") for pg in pdf.pages[-2:])
+    m = PENDING_SUMMARY_RE.search(re.sub(r"\s+", " ", text))
+    if not m:
+        return None
+    return int(m.group(1).replace(",", "")), int(m.group(2).replace(",", ""))
 
 
-def update_pending_history(history_csv: Path, snapshot_date: date, units: int) -> pd.DataFrame:
-    """把本次快照写进逐月历史（同月覆盖，月末那次即当月值）。
+def _read_pending_history(history_csv: Path) -> pd.DataFrame:
+    cols = ["month", "pending_units", "pending_applications"]
+    if not history_csv.exists():
+        return pd.DataFrame(columns=cols)
+    df = pd.read_csv(history_csv, dtype={"month": str})
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.NA
+    return df[cols]
 
-    这个源没有历史可回溯，只能每天跑、每天把当月这一格刷新成最新快照。
+
+def build_pending_presale_monthly(
+    start: date,
+    end: date,
+    history_csv: Path,
+    *,
+    refresh_latest: int = 2,
+    backfill: bool = False,
+) -> pd.DataFrame:
+    """待批预售楼花逐月序列。
+
+    每月一份 PDF、下载不便宜，所以历史抓一次就落盘到 history_csv，
+    日常只补「历史里还没有的月份」+ 最近 refresh_latest 个月（防事后修订）。
+    backfill=True 时忽略已有历史，把区间内所有月份重抓一遍。
     """
-    cols = ["month", "pending_units", "snapshot_date"]
-    if history_csv.exists():
-        hist = pd.read_csv(history_csv, dtype={"month": str})
-        for c in cols:
-            if c not in hist.columns:
-                hist[c] = None
-        hist = hist[cols]
+    s = _requests_session(referer=LANDSD_CONSENT_INDEX)
+    available = fetch_pending_available_months(s)
+    if not available:
+        raise RuntimeError("地政总署预售同意书索引页没解析出月份，页面结构可能已变。")
+
+    wanted = {month_str(d) for d in month_range_inclusive(start, end)}
+    candidates = [ym for ym in available if ym in wanted]
+
+    hist = _read_pending_history(history_csv)
+    known = set(hist["month"].astype(str)) if not hist.empty else set()
+    if backfill:
+        todo = candidates
     else:
-        hist = pd.DataFrame(columns=cols)
+        todo = [ym for ym in candidates if ym not in known]
+        todo += [ym for ym in candidates[-refresh_latest:] if ym not in todo]
+    todo = sorted(set(todo))
 
-    ym = month_str(snapshot_date)
-    hist = hist[hist["month"] != ym]
-    row = pd.DataFrame([{"month": ym, "pending_units": units,
-                         "snapshot_date": snapshot_date.isoformat()}])
-    hist = pd.concat([hist, row], ignore_index=True).sort_values("month")
-    hist["pending_units"] = hist["pending_units"].astype(int)
+    if todo:
+        print(f"  待批预售楼花: 需抓取 {len(todo)} 个月（历史已有 {len(known)} 个月）")
+    rows = []
+    for ym in todo:
+        got = fetch_pending_month(s, ym)
+        if got is None:
+            print(f"    {ym}: PDF 缺失或 Summary 解析失败，跳过")
+            continue
+        apps, units = got
+        rows.append({"month": ym, "pending_units": units, "pending_applications": apps})
+        print(f"    {ym}: {apps} 个申请 / {units:,} 伙")
 
+    if rows:
+        fresh = pd.DataFrame(rows)
+        hist = hist[~hist["month"].isin(fresh["month"])]
+        hist = pd.concat([hist, fresh], ignore_index=True)
+
+    hist = hist.dropna(subset=["month"]).sort_values("month").reset_index(drop=True)
+    hist["pending_units"] = hist["pending_units"].astype("Int64")
+    hist["pending_applications"] = hist["pending_applications"].astype("Int64")
     history_csv.parent.mkdir(parents=True, exist_ok=True)
     hist.to_csv(history_csv, index=False, encoding="utf-8-sig")
-    return hist.reset_index(drop=True)
+
+    months = [month_str(d) for d in month_range_inclusive(start, end)]
+    out = pd.DataFrame({"month": months}).merge(hist, on="month", how="left")
+    print(f"  待批预售楼花: 区间内 {int(out['pending_units'].notna().sum())}/{len(out)} 个月有值")
+    return out
 
 
 def fetch_ccl_monthly(start: date, end: date) -> pd.DataFrame:
@@ -661,6 +704,8 @@ def main() -> None:
     ap.add_argument("--selenium-visible", action="store_true", help="显示 Chrome（调试）")
     ap.add_argument("--dump-arcgis-fields", action="store_true")
     ap.add_argument("--skip-chart", action="store_true", help="不生成图表（仅本地调试时用）")
+    ap.add_argument("--pending-backfill", action="store_true",
+                    help="重抓区间内全部月份的待批预售楼花 PDF（首次建历史时用）")
     args = ap.parse_args()
 
     # GitHub Actions：workflow 设 FORCE_GENERATE_CHART=1 时必定出图（供邮件附件）
@@ -721,8 +766,9 @@ def main() -> None:
     # 这两个是看板的补充序列，任何一个挂掉都不该拖垮主流程
     print("[3/5] 正在获取待批预售楼花与中原城市领先指数 …")
     try:
-        snap_date, pending_units = fetch_pending_presale_snapshot()
-        pending = update_pending_history(PENDING_HISTORY_CSV, snap_date, pending_units)
+        pending = build_pending_presale_monthly(
+            start, end, PENDING_HISTORY_CSV, backfill=args.pending_backfill
+        )
         pending.to_csv(out_dir / "pending_presale_monthly.csv", index=False, encoding="utf-8-sig")
     except Exception as e:
         print(f"  [待批] 获取失败，本次跳过: {e}")
