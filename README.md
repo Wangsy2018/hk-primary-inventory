@@ -1,6 +1,19 @@
 # 香港一手短期库存（自动抓取 + 回推 + 定时邮件）
 
-自动下载政府预售批出、土地注册处一手成交，回推**即时可售货量**，并可在 GitHub Actions 上**每天定时运行**；数据相对上次有变化时**发邮件通知**。
+自动下载政府预售批出、土地注册处一手成交，回推**即时可售货量**，在 GitHub Actions 上**每天定时运行**；
+数据相对上次有变化时**发邮件通知**，并把交互式看板发布到 GitHub Pages。
+
+## 📊 网页版看板
+
+### **<https://wangsy2018.github.io/hk-primary-inventory/>**
+
+固定网址，任何设备打开都是最新数据，无需安装或登录。
+每天香港时间 **09:30** 自动更新（UTC 01:30），代码 push 到 `main` 时也会立即重建。
+
+手机上可「加到主画面 / 添加到主屏幕」，当成 App 用。
+
+> 刚部署完的 10 分钟内可能仍看到旧版 —— GitHub Pages 的 CDN 固定发 `cache-control: max-age=600`。
+> 强制刷新用 `Cmd+Shift+R`，或在网址后加 `?v=1`。日常查看碰不到。
 
 ## 本地运行（PyCharm）
 
@@ -48,55 +61,54 @@ git push -u origin main
 
 工作流文件：`.github/workflows/daily.yml`
 
-- 默认：**每天 UTC 01:30**（约香港 **09:30**）
-- 可在 GitHub **Actions** 页手动 **Run workflow** 测试
+- 定时：**每天 UTC 01:30**（约香港 **09:30**）
+- **push 到 `main` 也会触发**，代码一改网页立即重建（机器人用 `GITHUB_TOKEN` 的提交不会再触发，不会自我循环）
+- 也可在 GitHub **Actions** 页手动 **Run workflow**
 
 ### 4. 运行逻辑（发邮件规则）
 
-| 触发方式 | 数据有变化 | 是否发邮件 | 邮件内容 |
-|----------|------------|------------|----------|
-| **每天定时**（cron） | 是 | 发 | 附件：`report_chart.pdf` + `report_chart.png` |
-| **每天定时** | 否 | **不发** | — |
-| **手动 Run workflow** | 是 | 发 | 同上 + 更新 baseline |
-| **手动 Run workflow** | 否 | **仍发** | 仅附最新 PDF/PNG（正文说明无变化） |
+| 触发方式 | 数据有变化 | 是否发邮件 |
+|----------|------------|------------|
+| **每天定时**（cron） | 是 | 发 |
+| **每天定时** | 否 | **不发** |
+| **手动 / push 触发** | 是 | 发，并更新 baseline |
+| **手动 / push 触发** | 否 | **仍发**（正文说明无变化） |
 
-说明：邮件**不再**在正文里罗列 CSV 文件名，也**不附** CSV/Excel；只附生成的研报 **PDF 和 PNG**。
+邮件正文只有简短摘要 + 看板链接，**不带任何附件**（CSV / Excel / PDF / PNG 都不附）。
+未配置 SMTP 时会跳过发信并继续，不影响数据与网页更新。
 
-### 5. 本地测试「对比 + 邮件」（不跑 Selenium）
+### 5. 本地测试「对比 + 邮件」
 
-先改 `out_inventory` 里某个数字，再：
+先改 `out_inventory/` 里某个数字制造差异，再（macOS / Linux）：
 
 ```bash
-set SMTP_HOST=smtp.gmail.com
-set SMTP_PORT=587
-set SMTP_USER=你的邮箱
-set SMTP_PASSWORD=你的应用密码
-set SMTP_FROM=你的邮箱
-set NOTIFY_EMAIL_TO=收件人@example.com
-python run_daily.py
+SMTP_HOST=smtp.gmail.com SMTP_PORT=465 SMTP_USER=你的邮箱 \
+SMTP_PASSWORD=你的应用密码 SMTP_FROM=你的邮箱 \
+NOTIFY_EMAIL_TO=收件人@example.com python run_daily.py
 ```
 
-## 网页版看板（GitHub Pages）
+代码里用的是 `SMTP_SSL`，Gmail 端口填 **465**（不是 587），密码用
+[应用专用密码](https://support.google.com/accounts/answer/185833)。
 
-除定时邮件外，可把交互式 **HTML 看板**（ECharts：年度对照 / 可售货量走势 / 月度上下轴 / 季度上下轴）发布到 GitHub Pages，随时在浏览器查看，并每日自动更新。
+## 看板发布机制（已启用，无需再配置）
 
-### 网页版会自动发布
+看板共 5 张图：年度对照 / 即时可售货量 + 待批预售楼花 / 批出 vs 成交（月度）/ 批出 vs 成交（季度）/ 二手成交 vs CCL。
 
-`.github/workflows/daily.yml` 每次运行（每日定时或手动 Run workflow 都会）：
-1. 跑数据 pipeline 并生成 `out_inventory/dashboard.html`
-2. 包装为 `pages_build/index.html`，连同 `assets/echarts.min.js`
-3. 用 `actions/upload-pages-artifact` + `actions/deploy-pages` 部署到 GitHub Pages
+`.github/workflows/daily.yml` 每次运行都会：
+1. 跑数据 pipeline，生成 `out_inventory/dashboard.html`
+2. 包装为 `pages_build/index.html`，连同 `assets/echarts.min.js`（约 1 MB，已提交进仓库，网页完全自包含、不依赖 CDN）
+3. 用 `actions/upload-pages-artifact` + `actions/deploy-pages` 部署
 
-因此**只需一次性开启 GitHub Pages**，之后每次运行都会自动刷新网页版。
+若 `dashboard.html` 未生成则**中止发布**，保留线上已有页面，不会被空目录覆盖。
 
-### 一次性开启步骤
+<details>
+<summary>换仓库时的一次性配置</summary>
 
-1. 确认 `assets/echarts.min.js`（约 1 MB）已提交进仓库 —— 网页版完全自包含，无需联网加载 CDN。若尚未提交则一起 `git add assets/echarts.min.js`。
-2. 仓库 → **Settings** → **Pages**
-3. **Build and deployment** → **Source** 选择 **GitHub Actions**
-4. 在 **Actions** 页手动运行一次 **Daily inventory check & deploy dashboard**
-5. 部署成功后，deploy job 日志里有 `page_url`，通常为：
-   `https://<你的用户名>.github.io/<仓库名>/`
+1. **Settings → Pages → Build and deployment → Source** 选 **GitHub Actions**
+2. **Settings → Actions → General → Workflow permissions** 选 **Read and write**（自动提交 baseline 与待批历史需要）
+3. Actions 页手动跑一次，deploy job 日志里会给出 `page_url`
+
+</details>
 
 ### 本地预览网页版
 
@@ -126,32 +138,130 @@ python chart_dashboard.py
 - Linux CI 通过 **字体文件路径** 注册 Noto CJK（`daily.yml` 会 `fc-cache` 并重建 matplotlib 字体缓存）。
 - 可选：将 `NotoSansSC-Regular.otf` 放入 `assets/fonts/`，本地与 GitHub 使用同一字体文件。
 
-## 数据源
+## 数据源与抓取方式
 
-| 序列 | 来源 | 历史 |
-|------|------|------|
-| 预售批出伙数 | CSDI ArcGIS `LAO_PCRD` 图层 | 全历史 |
-| 一手 / 二手成交伙数 | 土地注册处 `/json/monthly_agt-pri/<年份段>/t1.json` | 2002-01 起 |
-| 中原城市领先指数 CCL | `hk.centanet.com/CCI/api/Index/CCLChart`，周度取每月最后一个观测 | 1993-12 起 |
-| 待批预售楼花单位数 | 地政总署预售同意书月报 `t2_YYMM.pdf` 末页 Summary | 2013-01 起（月末时点） |
+四个序列各有各的坑，这里把「取哪个 URL、怎么解析、为什么这么做」都写清楚，
+对应实现全在 [`一手短期库存.py`](一手短期库存.py)。
 
-> **待批预售楼花用的是地政总署按月归档的 PDF**，不是 CSDI 那个下载包。
-> CSDI 的 `LAO_PCRDP` 只有当前快照（`supportsQueryWithHistoricMoment=false`、data.gov.hk 未收录），
-> 而地政总署每月发一份「截至该月月底待批预售楼花同意书」的 PDF，索引页回溯到 2013-01。
-> 两者在 2026-07 对得上（同为 32 个申请 / 13,734 伙），但只有 PDF 有历史。
+| 序列 | 来源 | 历史起点 | 频率 |
+|------|------|----------|------|
+| 预售批出伙数 | CSDI ArcGIS `LAO_PCRD` 图层 | 全历史 | 月 |
+| 一手 / 二手成交伙数 | 土地注册处 `t1.json` | 2002-01 | 月 |
+| 待批预售楼花单位数 | 地政总署月报 PDF `t2_YYMM.pdf` | 2013-01 | 月末时点 |
+| 中原城市领先指数 CCL | 中原 `CCLChart` 接口 | 1993-12 | 周（取月末） |
+
+### 1. 预售批出伙数 —— CSDI ArcGIS
+
+```
+https://portal.csdi.gov.hk/server/rest/services/common/landsd_rcd_1637303511514_65978/FeatureServer/0
+```
+
+标准 ArcGIS REST，`/query?where=1=1&outFields=*&f=json`。先读 `?f=pjson` 拿到
+`maxRecordCount` 和 `objectIdField`，再按 `resultOffset` / `resultRecordCount` 分页，
+`orderByFields=OBJECTID ASC` 保证翻页稳定。
+
+用到三个字段：`SEARCH01_EN`（同意书年份）、`SEARCH02_EN`（同意书月份）、
+`NSEARCH13_EN`（住宅单位数目），按年月分组求和。
+
+> 字段名不直观，`--dump-arcgis-fields` 可导出全部字段名与中英别名。
+
+### 2. 一手 / 二手成交 —— 土地注册处 JSON 接口
+
+**不用 Selenium。** 页面上那些年份段按钮和表格都是 JS 渲染的，但数据其实来自静态 JSON：
+
+1. 主页 `https://www.landreg.gov.hk/tc/monthly/agreement.htm` 里内联了一段
+   `var pastStatJson=[...]`，正则取出即可，**不必渲染页面**。里面是三类统计，
+   取「住宅樓宇買賣合約統計數字:一手及二手買賣」那一类，得到年份段的 slug：
+   `agt-primary`（当年）、`agt-pri-1` … `agt-pri-5`（历史五年段）。
+2. 每个 slug 背后是 `https://www.landreg.gov.hk/json/monthly_agt-pri/<slug>/t1.json`，
+   字段自带 `Year` / `Month`，以及
+   `Number of Primary Sales for ASP Residential Building Units`（一手）和
+   `Number of Secondary Sales ...`（二手）。
+
+解析注意：
+- `Month` 为 `"Total"` 的是**年合计行**，要跳过（只收 1–12）。
+- 年份段之间有重叠（`agt-primary` 含 2022–2026，`agt-pri-5` 含 2021–2025），
+  **从最老的段开始写、新段覆盖旧段**，重叠月份以最新一版为准。
+
+> **为什么不解析渲染后的表格。** 早期版本用 Selenium + 写死的 `nth-child` 选择器找年份段链接，
+> 结果只抓到部分年份段，`2016-2019`、`2021-2024` 整整八年在 CSV 里是 0，而且**静默补 0**、
+> 从结果上看不出来。现在改成 JSON，年份直接来自字段，不必再从 DOM id `t1Y{n}r{m}_td{k}` 反推。
 >
-> 取的是 PDF 末页 Summary 里的合计，不解析表格。用**英文版**：中文版 2016/2017 的措辞与现在不同，
-> 英文版十年来只把 `units pending approval` 换成过 `units involved`，一个正则兼容两种。
-> 抓过的月份落盘在 `data/history/pending_presale_monthly.csv` 并提交进仓库，
-> 日常运行只补缺失月份 + 重抓最近 2 个月（防事后修订）；
-> `python 一手短期库存.py --pending-backfill` 可重建全部历史。
+> 保留了 Selenium 回退（`build_landreg_primary_monthly_via_selenium`），
+> 但只在 JSON 通道失败时才启用；`--no-landreg-selenium` 可彻底禁用。
+> 另有 `_assert_landreg_coverage()`：区间内缺月就直接报错触发回退，
+> **绝不静默补 0** —— 补 0 会直接污染回推出来的库存曲线。
 
-变更通知只看 `data/baseline/` 里的三个核心文件（批出 / 成交 / 回推库存）。
-CCL 每周都动、待批随时在变，两者只进看板不触发邮件，避免天天收到通知。
+### 3. 待批预售楼花 —— 地政总署月报 PDF
+
+索引页列出每个月的归档（回溯到 2013-01）：
+
+```
+https://www.landsd.gov.hk/en/resources/land-info-stat/dev-control-compliance/consent/presale.html
+```
+
+每月三份 PDF，要的是 **t2**（待批）：
+
+```
+https://www.landsd.gov.hk/doc/en/consent/monthly/t2_YYMM.pdf     # 例: t2_2607.pdf = 2026-07
+```
+
+**只读末页的 Summary，不解析表格。** 明细表跨十几页、单元格还会换行，解析极易出错；
+而末页有现成的合计：
+
+```
+Total no. of Pre-sale Consent (Residential) applications pending approval : 32
+Total no. of residential units involved : 13,734
+```
+
+用**英文版**：中文版措辞变过（2016/2017 是「预售楼花同意书(住宅)待批数目」，
+现在是「待批预售楼花同意书(住宅)申请数目」），英文版十年只把
+`units pending approval` 换成过 `units involved`，一个正则兼容两种。
+
+抓过的月份落盘 `data/history/pending_presale_monthly.csv` 并提交进仓库，
+日常运行**只补缺失月份 + 重抓最近 2 个月**（防事后修订），不会每天下一百多份 PDF。
+重建全部历史：
+
+```bash
+python 一手短期库存.py --pending-backfill
+```
+
+> **为什么不用 CSDI 的 `LAO_PCRDP` 下载包**（`static.csdi.gov.hk/csdi-webpage/download/.../csv`）：
+> 那份**只有当前快照，没有任何历史**。ArcGIS 图层自报 `supportsQueryWithHistoricMoment: false`、
+> `startArchivingMoment: -1`，URL 挂日期参数一律被忽略，data.gov.hk 的历史存档也未收录（0 个版本），
+> 而且图层里没有「申请日期」字段，无法反推过去时点的存量。
+> 两者口径一致（2026-07 都是 32 个申请 / 13,734 伙），但只有 PDF 有历史。
+
+### 4. 中原城市领先指数 CCL
+
+```
+https://hk.centanet.com/CCI/api/Index/CCLChart
+```
+
+> **注意那个 `/CCI` 前缀。** 页面 JS 里写的是 `$axios.get("/api/Index/CCLChart")`，
+> 但直接请求 `https://hk.centanet.com/api/Index/CCLChart` 是 **404**，要带 `/CCI/` 才对。
+
+GET 即可，返回 `rawData`，其中 `ccl` 是周度指数值，`realContractEndDate` 是对应的
+合约期结束日（与网站图表 x 轴一致），两个等长数组。1993-12 至今一千七百多个点。
+
+按 `realContractEndDate` 归月，**取每月最后一个观测**作为该月的月末时点数。
+
+### 通用：本机代理会挡掉港府站点
+
+CSDI 和土地注册处经本机全局代理（Clash / VPN 之类）访问常常连不通
+（Chrome 报 `ERR_TUNNEL_CONNECTION_FAILED`，curl 报 56），直连则正常。
+`_http_get()` 会在请求失败时**自动绕过代理直连重试一次**，本地不用手动关代理。
+
+### 变更通知的取舍
+
+变更比对只看 `data/baseline/` 里的三个核心文件（批出 / 一手二手成交 / 回推库存）。
+**CCL 和待批不纳入比对** —— CCL 每周都动，计入的话「数据已更新」的邮件几乎天天发。
+两者只进看板。
 
 ## 注意事项
 
-- 土地注册处数据走其页面背后的 **JSON 接口**（`/json/monthly_agt-pri/<年份段>/t1.json`，字段自带 `Year` / `Month`），不需要浏览器。
-  workflow 里仍装 Chrome，只作为 JSON 接口失效时 **Selenium 回退**的保底；加 `--no-landreg-selenium` 可禁用回退。
+- 正常路径**不需要浏览器**，四个数据源都是 HTTP + JSON/PDF。workflow 里仍装 Chrome，
+  只为土地注册处 JSON 接口失效时的 Selenium 回退保底 —— 细节见 [数据源与抓取方式](#数据源与抓取方式)。
+- GitHub 会在仓库**连续 60 天无活动**后自动停用定时工作流（会发邮件提醒），到 Actions 页点一下即可恢复。
 - 首次 push 后第一次 Action 只会**建立 baseline**，一般**不发邮件**；从第二次起才会在数据变化时通知。
 - 不要把 SMTP 密码写进代码，只用 GitHub Secrets。
