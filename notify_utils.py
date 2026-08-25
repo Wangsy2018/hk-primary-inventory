@@ -20,8 +20,12 @@ TRACKED_FILES = (
 COLUMN_LABELS = {
     "presale_approved_units": "预售批出伙数",
     "primary_units": "一手成交伙数",
+    "secondary_units": "二手成交伙数",
     "instant_saleable_inventory": "即时可售货量",
 }
+
+# 注：CCL 与待批预售楼花只进看板，不纳入 TRACKED_FILES —— CCL 每周都动，
+# 计入比对会让「数据有更新」的邮件几乎天天发。
 
 
 @dataclass

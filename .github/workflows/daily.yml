@@ -71,14 +71,19 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Commit updated baseline
-        if: steps.run.outputs.updated == 'true'
+      # 无条件跑：待批预售楼花没有历史源，逐月累积的 data/history/ 必须落盘，
+      # 否则过了这个月这一格就永远补不回来了
+      - name: Commit updated data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/baseline/
-          git diff --staged --quiet || git commit -m "chore: update inventory baseline after data change"
-          git push
+          git add data/
+          if git diff --staged --quiet; then
+            echo "data/ 无变化，跳过提交"
+          else
+            git commit -m "chore: update inventory baseline and pending-presale history"
+            git push
+          fi
 
       - name: Bundle dashboard for GitHub Pages
         run: |

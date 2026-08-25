@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import math
 import re
 import time
+import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -36,9 +38,23 @@ LANDREG_INDEX = f"{LANDREG_BASE}/tc/monthly/agreement.htm"
 # 年份段页面背后的数据源；t1.json = 单位数，t2.json = 合约金额
 LANDREG_JSON_DIR = f"{LANDREG_BASE}/json/monthly_agt-pri"
 LANDREG_PRIMARY_KEY = "Number of Primary Sales for ASP Residential Building Units"
+LANDREG_SECONDARY_KEY = "Number of Secondary Sales for ASP Residential Building Units"
+
+# 待批预售楼花同意书（住宅）：只有当前快照，没有历史，见 update_pending_history()
+PENDING_CSV_URL = (
+    "https://static.csdi.gov.hk/csdi-webpage/download/"
+    "c84ee393122e5442985d6ce1cdddd162/csv"
+)
+PENDING_UNITS_FIELD = "NSEARCH11_EN"
+
+# 中原城市领先指数 CCL：周度，1993-12 至今
+CCL_CHART_URL = "https://hk.centanet.com/CCI/api/Index/CCLChart"
+CCL_REFERER = "https://hk.centanet.com/CCI/index"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR = PROJECT_DIR / "out_inventory"
+# 待批预售楼花没有历史，只能逐月累积；这份要提交进仓库才不会丢
+PENDING_HISTORY_CSV = PROJECT_DIR / "data" / "history" / "pending_presale_monthly.csv"
 
 
 def month_str(d: date) -> str:
@@ -198,14 +214,22 @@ def build_presale_approvals_monthly(
 
 
 def _landreg_rows_to_frame(
-    rows: dict[tuple[int, int], int], start: date, end: date
+    rows: dict[tuple[int, int], dict[str, int]], start: date, end: date
 ) -> pd.DataFrame:
     df = pd.DataFrame(
-        [{"month": f"{y:04d}-{m:02d}", "primary_units": v} for (y, m), v in rows.items()]
+        [
+            {
+                "month": f"{y:04d}-{m:02d}",
+                "primary_units": v.get("primary_units"),
+                "secondary_units": v.get("secondary_units"),
+            }
+            for (y, m), v in rows.items()
+        ]
     )
     months = [month_str(d) for d in month_range_inclusive(start, end)]
     df = pd.DataFrame({"month": months}).merge(df, on="month", how="left")
-    df["primary_units"] = df["primary_units"].fillna(0).astype(int)
+    for c in ("primary_units", "secondary_units"):
+        df[c] = df[c].fillna(0).astype(int)
     return df
 
 
@@ -238,7 +262,7 @@ def build_landreg_primary_monthly_via_json(start: date, end: date) -> pd.DataFra
     if not periods:
         raise RuntimeError("未找到一手成交年份段，土地注册处页面结构可能已变。")
 
-    rows: dict[tuple[int, int], int] = {}
+    rows: dict[tuple[int, int], dict[str, int]] = {}
     # 从最老的年份段开始写，新段覆盖旧段：重叠月份以最新一版为准
     for title, slug in reversed(periods):
         r = _http_get(s, f"{LANDREG_JSON_DIR}/{slug}/t1.json", timeout=60)
@@ -249,10 +273,11 @@ def build_landreg_primary_monthly_via_json(start: date, end: date) -> pd.DataFra
         for rec in r.json():
             y = _to_int_safe(rec.get("Year"))
             mo = _to_int_safe(rec.get("Month"))  # 年合计行的 Month 是 "Total"
-            v = _to_int_safe(rec.get(LANDREG_PRIMARY_KEY))
-            if y is None or mo is None or v is None or not (1 <= mo <= 12):
+            pri = _to_int_safe(rec.get(LANDREG_PRIMARY_KEY))
+            sec = _to_int_safe(rec.get(LANDREG_SECONDARY_KEY))
+            if y is None or mo is None or pri is None or not (1 <= mo <= 12):
                 continue
-            rows[(y, mo)] = v
+            rows[(y, mo)] = {"primary_units": pri, "secondary_units": sec or 0}
             got += 1
         print(f"  土地注册处 {title}（{slug}）: {got} 个月")
 
@@ -371,7 +396,7 @@ def build_landreg_primary_monthly_via_selenium(
         raise RuntimeError("未找到一手成交年份段链接，请检查地政署页面结构是否有变。")
 
     pattern = re.compile(r"t([12])Y(\d+)r(\d+)_td(\d+)$")
-    rows: dict[tuple[int, int], int] = {}
+    rows: dict[tuple[int, int], dict[str, int]] = {}
 
     def calendar_year(start_year: int, end_year: int, y_index: int) -> int:
         if start_year == end_year:
@@ -411,7 +436,7 @@ def build_landreg_primary_monthly_via_selenium(
                 row_type = int(match.group(3))
                 month = int(match.group(4))
 
-                if table_type != "1" or row_type != 1:
+                if table_type != "1" or row_type not in (1, 2):
                     continue
 
                 current_year = calendar_year(start_year, end_year, y_index)
@@ -421,8 +446,8 @@ def build_landreg_primary_monthly_via_selenium(
                 raw = (element.text or "").replace(",", "").strip()
                 if not raw:
                     continue
-                value = int(raw)
-                rows[(current_year, month)] = value
+                key = "primary_units" if row_type == 1 else "secondary_units"
+                rows.setdefault((current_year, month), {})[key] = int(raw)
             except StaleElementReferenceException:
                 continue
             except (ValueError, TypeError):
@@ -489,6 +514,99 @@ def build_landreg_primary_monthly_via_selenium(
 #     out = pd.DataFrame({"month": months}).merge(g, on="month", how="left")
 #     out["pending_presale_units"] = out["pending_presale_units"].fillna(0).astype(int)
 #     return out
+
+
+def fetch_pending_presale_snapshot() -> tuple[date, int]:
+    """待批预售楼花同意书的住宅单位总数。
+
+    数据源是一个 zip（内含单个 CSV），且**只有当前快照、没有任何历史**
+    （ArcGIS 图层 supportsQueryWithHistoricMoment=false，data.gov.hk 也未存档）。
+    所以历史只能靠 update_pending_history() 逐月累积。
+    返回 (快照日期, 单位总数)。
+    """
+    s = _requests_session(referer="https://portal.csdi.gov.hk/geoportal/")
+    r = _http_get(s, PENDING_CSV_URL, timeout=120)
+    r.raise_for_status()
+
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+        if not names:
+            raise RuntimeError(f"待批预售楼花压缩包里没有 CSV: {zf.namelist()}")
+        name = names[0]
+        with zf.open(name) as fh:
+            df = pd.read_csv(fh)
+
+    if PENDING_UNITS_FIELD not in df.columns:
+        raise RuntimeError(
+            f"待批数据缺字段 {PENDING_UNITS_FIELD}，实际字段: {list(df.columns)[:20]}"
+        )
+    units = int(pd.to_numeric(df[PENDING_UNITS_FIELD], errors="coerce").fillna(0).sum())
+
+    # 文件名形如 LAO_PCRDP_20260816_gdb_..._converted.csv，日期即快照日
+    m = re.search(r"_(\d{8})_", name)
+    snap = (
+        date(int(m.group(1)[:4]), int(m.group(1)[4:6]), int(m.group(1)[6:8]))
+        if m
+        else date.today()
+    )
+    print(f"  待批预售楼花: {len(df)} 个项目, {units:,} 伙（快照日 {snap.isoformat()}）")
+    return snap, units
+
+
+def update_pending_history(history_csv: Path, snapshot_date: date, units: int) -> pd.DataFrame:
+    """把本次快照写进逐月历史（同月覆盖，月末那次即当月值）。
+
+    这个源没有历史可回溯，只能每天跑、每天把当月这一格刷新成最新快照。
+    """
+    cols = ["month", "pending_units", "snapshot_date"]
+    if history_csv.exists():
+        hist = pd.read_csv(history_csv, dtype={"month": str})
+        for c in cols:
+            if c not in hist.columns:
+                hist[c] = None
+        hist = hist[cols]
+    else:
+        hist = pd.DataFrame(columns=cols)
+
+    ym = month_str(snapshot_date)
+    hist = hist[hist["month"] != ym]
+    row = pd.DataFrame([{"month": ym, "pending_units": units,
+                         "snapshot_date": snapshot_date.isoformat()}])
+    hist = pd.concat([hist, row], ignore_index=True).sort_values("month")
+    hist["pending_units"] = hist["pending_units"].astype(int)
+
+    history_csv.parent.mkdir(parents=True, exist_ok=True)
+    hist.to_csv(history_csv, index=False, encoding="utf-8-sig")
+    return hist.reset_index(drop=True)
+
+
+def fetch_ccl_monthly(start: date, end: date) -> pd.DataFrame:
+    """中原城市领先指数 CCL：周度序列取每月最后一个观测值作为该月时点数。"""
+    s = _requests_session(referer=CCL_REFERER)
+    r = _http_get(s, CCL_CHART_URL, timeout=90)
+    r.raise_for_status()
+    raw = (r.json() or {}).get("rawData") or {}
+
+    values = raw.get("ccl") or []
+    # 以「合约期结束日」为观测日，与网站图表 x 轴一致
+    dates = raw.get("realContractEndDate") or raw.get("times") or []
+    if not values or len(values) != len(dates):
+        raise RuntimeError(f"CCL 数据异常: {len(values)} 个值 / {len(dates)} 个日期")
+
+    obs = pd.DataFrame({"d": pd.to_datetime(dates, errors="coerce"), "ccl": values})
+    obs = obs.dropna(subset=["d", "ccl"])
+    obs["month"] = obs["d"].dt.strftime("%Y-%m")
+    # 每月最后一周的读数
+    last = obs.sort_values("d").groupby("month", as_index=False).last()[["month", "d", "ccl"]]
+    last = last.rename(columns={"d": "obs_date"})
+    last["obs_date"] = last["obs_date"].dt.strftime("%Y-%m-%d")
+    last["ccl"] = last["ccl"].astype(float).round(2)
+
+    months = [month_str(d) for d in month_range_inclusive(start, end)]
+    out = pd.DataFrame({"month": months}).merge(last, on="month", how="left")
+    got = int(out["ccl"].notna().sum())
+    print(f"  中原城市领先指数 CCL: 全量 {len(obs)} 个周度点，区间内 {got}/{len(out)} 个月有值")
+    return out
 
 
 def compute_inventory_by_anchor_backcast(
@@ -579,18 +697,18 @@ def main() -> None:
     print(f"锚点: {args.anchor_month} = {args.anchor_inventory}")
     print()
 
-    print("[1/3] 正在下载政府 ArcGIS 预售批出伙数 …")
+    print("[1/5] 正在下载政府 ArcGIS 预售批出伙数 …")
     approvals = build_presale_approvals_monthly(start=start, end=end)
     approvals.to_csv(out_dir / "presale_approvals_monthly.csv", index=False, encoding="utf-8-sig")
 
     if args.landreg_primary_csv:
-        print("[2/3] 读取本地一手成交 CSV …")
+        print("[2/5] 读取本地一手成交 CSV …")
         sales = pd.read_csv(args.landreg_primary_csv, dtype={"month": str})
         months = [month_str(d) for d in month_range_inclusive(start, end)]
         sales = pd.DataFrame({"month": months}).merge(sales, on="month", how="left")
         sales["primary_units"] = sales["primary_units"].fillna(0).astype(int)
     else:
-        print("[2/3] 正在获取土地注册处一手成交 …")
+        print("[2/5] 正在获取土地注册处一手成交（含二手）…")
         sales = build_landreg_primary_monthly(
             start=start,
             end=end,
@@ -600,7 +718,21 @@ def main() -> None:
 
     sales.to_csv(out_dir / "landreg_primary_monthly.csv", index=False, encoding="utf-8-sig")
 
-    print("[3/3] 计算即时可售货量 …")
+    # 这两个是看板的补充序列，任何一个挂掉都不该拖垮主流程
+    print("[3/5] 正在获取待批预售楼花与中原城市领先指数 …")
+    try:
+        snap_date, pending_units = fetch_pending_presale_snapshot()
+        pending = update_pending_history(PENDING_HISTORY_CSV, snap_date, pending_units)
+        pending.to_csv(out_dir / "pending_presale_monthly.csv", index=False, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"  [待批] 获取失败，本次跳过: {e}")
+    try:
+        ccl = fetch_ccl_monthly(start, end)
+        ccl.to_csv(out_dir / "ccl_monthly.csv", index=False, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"  [CCL] 获取失败，本次跳过: {e}")
+
+    print("[4/5] 计算即时可售货量 …")
     inv = compute_inventory_by_anchor_backcast(
         approvals, sales, args.anchor_month, args.anchor_inventory
     )
@@ -628,7 +760,7 @@ def main() -> None:
         return
 
     # ----- 生成投行级图表（不含待批）-----
-    print("\n[4/4] 正在生成研报图表 …")
+    print("\n[5/5] 正在生成研报图表 …")
     generate_report_chart(inv, out_dir)  # 不再传递 pending_df
     print("图表生成完毕。")
 

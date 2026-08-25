@@ -115,7 +115,8 @@ python chart_dashboard.py
 | `chart_dashboard.py` | 生成交互式 HTML 看板（ECharts），供本地 / GitHub Pages 查看 |
 | `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
 | `notify_utils.py` | 数据 diff 与 SMTP 发信 |
-| `data/baseline/` | 上次确认的数据快照（提交到 Git） |
+| `data/baseline/` | 上次确认的数据快照（提交到 Git），用于判断「是否有更新」 |
+| `data/history/` | 待批预售楼花的逐月累积历史（提交到 Git），**丢了补不回来** |
 | `assets/echarts.min.js` | 内嵌的 ECharts 库（网页版离线可用） |
 | `.github/workflows/daily.yml` | GitHub Actions 定时任务 |
 
@@ -124,6 +125,23 @@ python chart_dashboard.py
 - 图表逻辑集中在 `chart_report.py`，与本地 `Inventory with chart.py` 的数据准备、季度/逐月横轴一致；仅开头连续为 0 的库存月不画线（与本地相同）。
 - Linux CI 通过 **字体文件路径** 注册 Noto CJK（`daily.yml` 会 `fc-cache` 并重建 matplotlib 字体缓存）。
 - 可选：将 `NotoSansSC-Regular.otf` 放入 `assets/fonts/`，本地与 GitHub 使用同一字体文件。
+
+## 数据源
+
+| 序列 | 来源 | 历史 |
+|------|------|------|
+| 预售批出伙数 | CSDI ArcGIS `LAO_PCRD` 图层 | 全历史 |
+| 一手 / 二手成交伙数 | 土地注册处 `/json/monthly_agt-pri/<年份段>/t1.json` | 2002-01 起 |
+| 中原城市领先指数 CCL | `hk.centanet.com/CCI/api/Index/CCLChart`，周度取每月最后一个观测 | 1993-12 起 |
+| 待批预售楼花单位数 | CSDI `LAO_PCRDP` 下载包（CSV/GeoJSON 同一份数据） | **只有当前快照** |
+
+> **待批预售楼花没有历史。** ArcGIS 图层 `supportsQueryWithHistoricMoment=false`、`startArchivingMoment=-1`，
+> data.gov.hk 也未收录该 URL，所以任何过去月份的存量都无从回溯。
+> 每次运行把当月这一格刷成最新快照并追加进 `data/history/pending_presale_monthly.csv`，
+> 这条线会从启用之日起逐月长出来 —— 这份文件必须提交进仓库，否则历史就断了。
+
+变更通知只看 `data/baseline/` 里的三个核心文件（批出 / 成交 / 回推库存）。
+CCL 每周都动、待批随时在变，两者只进看板不触发邮件，避免天天收到通知。
 
 ## 注意事项
 

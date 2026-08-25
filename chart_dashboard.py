@@ -44,6 +44,29 @@ def _load_landreg_csv(dirpath: Path) -> pd.DataFrame:
     return df
 
 
+def _load_optional_csv(dirpath: Path, name: str) -> pd.DataFrame | None:
+    """补充序列缺失时返回 None，看板照常渲染其余图表。"""
+    path = dirpath / name
+    if not path.exists():
+        print(f"[看板] 缺 {name}，相关序列留空")
+        return None
+    df = pd.read_csv(path)
+    df.columns = [c.strip() for c in df.columns]
+    return df
+
+
+def _series_by_month(df: pd.DataFrame | None, months: list[str], col: str) -> list:
+    """按 months 顺序对齐取值，缺失填 None（ECharts 会断线而不是画到 0）。"""
+    if df is None or col not in df.columns or "month" not in df.columns:
+        return [None] * len(months)
+    m = dict(zip(df["month"].astype(str), df[col]))
+    out = []
+    for ym in months:
+        v = m.get(ym)
+        out.append(None if v is None or pd.isna(v) else float(v))
+    return out
+
+
 def _month_label(df: pd.DataFrame) -> list[str]:
     return df["date"].dt.strftime("%Y-%m").tolist()
 
@@ -52,6 +75,8 @@ def build_dashboard_html(dirpath: Path) -> str:
     inv = _load_inventory_csv(dirpath)
     presale = _load_presale_csv(dirpath)
     landreg = _load_landreg_csv(dirpath)
+    pending_df = _load_optional_csv(dirpath, "pending_presale_monthly.csv")
+    ccl_df = _load_optional_csv(dirpath, "ccl_monthly.csv")
     echarts_src = resolve_echarts_src(dirpath)
 
     # 合并月度批出 / 成交，统一用 YYYY-MM 字符串作 key
@@ -70,6 +95,11 @@ def build_dashboard_html(dirpath: Path) -> str:
 
     months = _month_label(inv)
     inv_vals = [None if pd.isna(v) else int(v) for v in inv["instant_saleable_inventory"]]
+    pending_vals = [None if v is None else int(v)
+                    for v in _series_by_month(pending_df, months, "pending_units")]
+    ccl_vals = _series_by_month(ccl_df, months, "ccl")
+    secondary_vals = [0 if v is None else int(v)
+                      for v in _series_by_month(landreg, months, "secondary_units")]
     presale_vals = [int(v) for v in monthly["presale_approved_units"]]
     primary_vals = [int(v) for v in monthly["primary_units"]]
 
@@ -123,6 +153,7 @@ def build_dashboard_html(dirpath: Path) -> str:
 
     data = {
         "months": months, "inv": inv_vals,
+        "pending": pending_vals, "ccl": ccl_vals, "secondary": secondary_vals,
         "presale": presale_vals, "primary": primary_vals,
         "q_keys": q_keys, "q_presale": q_presale, "q_primary": q_primary,
         "m_annual": m_annual, "q_annual": q_annual,
@@ -197,7 +228,7 @@ def build_dashboard_html(dirpath: Path) -> str:
     </div>
 
     <div class="chart-card">
-      <h2>即时可售货量（月度走势 · 默认显示近 3 年，可拖动查看更早）</h2>
+      <h2>即时可售货量 vs 待批预售楼花（月度走势 · 默认显示近 3 年，可拖动查看更早）</h2>
       <div id="chart-inv" class="chart"></div>
     </div>
 
@@ -209,6 +240,11 @@ def build_dashboard_html(dirpath: Path) -> str:
     <div class="chart-card">
       <h2>批出 vs 成交（季度聚合 · 年度合计标注）</h2>
       <div id="chart-quarter" class="chart"></div>
+    </div>
+
+    <div class="chart-card">
+      <h2>二手成交 vs 中原城市领先指数 CCL（月度 · 柱为成交伙数，线为月末 CCL）</h2>
+      <div id="chart-second" class="chart"></div>
     </div>
   </div>
 
@@ -244,26 +280,40 @@ def build_dashboard_html(dirpath: Path) -> str:
     tooltip: {{
       trigger: 'axis',
       formatter: function(ps) {{
-        var p = ps[0];
-        return p.axisValue + '<br/>可售货量: <b>' + (p.value==null?'—':Number(p.value).toLocaleString()) + '</b> 伙';
+        var s = ps[0].axisValue + '<br/>';
+        ps.forEach(function(p){{
+          s += p.marker + p.seriesName + ': <b>' +
+               (p.value==null ? '—' : Number(p.value).toLocaleString()) + '</b> 伙<br/>';
+        }});
+        return s;
       }}
     }},
-    grid: {{ left: 60, right: 30, top: 30, bottom: 40 }},
+    legend: {{ data: ['即时可售货量', '待批预售楼花'], top: 0 }},
+    grid: {{ left: 60, right: 30, top: 40, bottom: 40 }},
     xAxis: {{ type: 'category', data: D.months, boundaryGap: false }},
     yAxis: {{ type: 'value', name: '伙', nameGap: 16 }},
     dataZoom: [
       {{ type: 'inside', start: zoomStart, end: 100 }},
       {{ type: 'slider', height: 18, bottom: 4, start: zoomStart, end: 100 }}
     ],
-    series: [{{
-      name: '即时可售货量', type: 'line', data: D.inv, smooth: true,
-      symbol: 'circle', symbolSize: 5,
-      lineStyle: {{ width: 3, color: '#1f6feb' }},
-      itemStyle: {{ color: '#1f6feb' }},
-      areaStyle: {{ color: new echarts.graphic.LinearGradient(0,0,0,1,[
-        {{offset:0,color:'rgba(31,111,235,0.25)'}},{{offset:1,color:'rgba(31,111,235,0.02)'}}
-      ]) }}
-    }}]
+    series: [
+      {{
+        name: '即时可售货量', type: 'line', data: D.inv, smooth: true,
+        symbol: 'circle', symbolSize: 5,
+        lineStyle: {{ width: 3, color: '#1f6feb' }},
+        itemStyle: {{ color: '#1f6feb' }},
+        areaStyle: {{ color: new echarts.graphic.LinearGradient(0,0,0,1,[
+          {{offset:0,color:'rgba(31,111,235,0.25)'}},{{offset:1,color:'rgba(31,111,235,0.02)'}}
+        ]) }}
+      }},
+      {{
+        // 该源只有当前快照、无历史，所以这条线从启用之日起逐月长出来
+        name: '待批预售楼花', type: 'line', data: D.pending, smooth: true,
+        connectNulls: false, symbol: 'circle', symbolSize: 6,
+        lineStyle: {{ width: 2, color: '#e8890c', type: 'dashed' }},
+        itemStyle: {{ color: '#e8890c' }}
+      }}
+    ]
   }});
 
   // ---------- 蝴蝶图（上下轴）工厂函数：上图批出、下图成交，年度合计标注 ----------
@@ -332,8 +382,49 @@ def build_dashboard_html(dirpath: Path) -> str:
   }});
   qChart.setOption(butterfly(D.q_keys, D.q_presale, D.q_primary, qAnnualText, 45));
 
+  // ---------- 二手成交（柱） vs 中原城市领先指数 CCL（线，右轴） ----------
+  var secondChart = echarts.init(document.getElementById('chart-second'));
+  secondChart.setOption({{
+    tooltip: {{
+      trigger: 'axis',
+      axisPointer: {{ type: 'cross' }},
+      formatter: function(ps) {{
+        var s = ps[0].axisValue + '<br/>';
+        ps.forEach(function(p){{
+          if (p.value == null) return;
+          var unit = (p.seriesName === 'CCL') ? '' : ' 伙';
+          s += p.marker + p.seriesName + ': <b>' + Number(p.value).toLocaleString() + '</b>' + unit + '<br/>';
+        }});
+        return s;
+      }}
+    }},
+    legend: {{ data: ['二手成交', 'CCL'], top: 0 }},
+    grid: {{ left: 60, right: 60, top: 40, bottom: 40 }},
+    xAxis: {{ type: 'category', data: D.months, axisLabel: {{ rotate: 45 }} }},
+    yAxis: [
+      {{ type: 'value', name: '伙', nameGap: 16 }},
+      {{ type: 'value', name: 'CCL', nameGap: 16, scale: true, splitLine: {{ show: false }} }}
+    ],
+    dataZoom: [
+      {{ type: 'inside', start: zoomStart, end: 100 }},
+      {{ type: 'slider', height: 18, bottom: 4, start: zoomStart, end: 100 }}
+    ],
+    series: [
+      {{
+        name: '二手成交', type: 'bar', yAxisIndex: 0, data: D.secondary,
+        itemStyle: {{ color: '#7f7fd5' }}, barMaxWidth: 18
+      }},
+      {{
+        name: 'CCL', type: 'line', yAxisIndex: 1, data: D.ccl, smooth: true,
+        connectNulls: false, symbol: 'none',
+        lineStyle: {{ width: 2.5, color: '#c0392b' }}, itemStyle: {{ color: '#c0392b' }}
+      }}
+    ]
+  }});
+
   window.addEventListener('resize', function(){{
-    annualChart.resize(); invChart.resize(); flowChart.resize(); qChart.resize();
+    annualChart.resize(); invChart.resize(); flowChart.resize();
+    qChart.resize(); secondChart.resize();
   }});
 </script>
 </body>
