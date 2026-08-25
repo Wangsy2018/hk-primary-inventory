@@ -141,6 +141,7 @@ python chart_dashboard.py
 |------|------|----------|------|
 | 预售批出伙数 | CSDI ArcGIS `LAO_PCRD` 图层 | 全历史 | 月 |
 | 一手 / 二手成交伙数 | 土地注册处 `t1.json` | 2002-01 | 月 |
+| 一手 / 二手成交金额 | 土地注册处 `t2.json`（$ million） | 2002-01 | 月 |
 | 待批预售楼花单位数 | 地政总署月报 PDF `t2_YYMM.pdf` | 2013-01 | 月末时点 |
 | 中原城市领先指数 CCL | 中原 `CCLChart` 接口 | 1993-12 | 周（取月末） |
 
@@ -167,15 +168,19 @@ https://portal.csdi.gov.hk/server/rest/services/common/landsd_rcd_1637303511514_
    `var pastStatJson=[...]`，正则取出即可，**不必渲染页面**。里面是三类统计，
    取「住宅樓宇買賣合約統計數字:一手及二手買賣」那一类，得到年份段的 slug：
    `agt-primary`（当年）、`agt-pri-1` … `agt-pri-5`（历史五年段）。
-2. 每个 slug 背后是 `https://www.landreg.gov.hk/json/monthly_agt-pri/<slug>/t1.json`，
-   字段自带 `Year` / `Month`，以及
-   `Number of Primary Sales for ASP Residential Building Units`（一手）和
-   `Number of Secondary Sales ...`（二手）。
+2. 每个 slug 背后有两份 JSON，字段都自带 `Year` / `Month`：
+   - `.../monthly_agt-pri/<slug>/**t1**.json` —— **成交单位数**
+     （`Number of Primary Sales ...` / `Number of Secondary Sales ...`）
+   - `.../monthly_agt-pri/<slug>/**t2**.json` —— **成交金额**
+     （`Consideration of Primary Sales ...` / `Consideration of Secondary Sales ...`），
+     单位是**港币百万**（页面表头写明 `Consideration ($ million)`），除以 100 即為億
 
 解析注意：
 - `Month` 为 `"Total"` 的是**年合计行**，要跳过（只收 1–12）。
 - 年份段之间有重叠（`agt-primary` 含 2022–2026，`agt-pri-5` 含 2021–2025），
   **从最老的段开始写、新段覆盖旧段**，重叠月份以最新一版为准。
+- 成交金额只写进 `out_inventory/landreg_full_monthly.csv`（2002-01 起的全量历史，供看板用），
+  **不进** `landreg_primary_monthly.csv` —— 后者参与变更比对与库存回推，多加列只会制造噪音。
 
 > **为什么不解析渲染后的表格。** 早期版本用 Selenium + 写死的 `nth-child` 选择器找年份段链接，
 > 结果只抓到部分年份段，`2016-2019`、`2021-2024` 整整八年在 CSV 里是 0，而且**静默补 0**、
@@ -238,7 +243,8 @@ https://hk.centanet.com/CCI/api/Index/CCLChart
 GET 即可，返回 `rawData`，其中 `ccl` 是周度指数值，`realContractEndDate` 是对应的
 合约期结束日（与网站图表 x 轴一致），两个等长数组。1993-12 至今一千七百多个点。
 
-按 `realContractEndDate` 归月，**取每月最后一个观测**作为该月的月末时点数。
+按 `realContractEndDate` 归月，**取每月最后一个观测**作为该月的月末时点数，
+输出 `ccl_monthly.csv` 时**不截断**（1994-01 起全量），看板底部两张图用自己的长横轴。
 
 ### 通用：本机代理会挡掉港府站点
 

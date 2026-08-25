@@ -67,6 +67,21 @@ def _series_by_month(df: pd.DataFrame | None, months: list[str], col: str) -> li
     return out
 
 
+def _union_months(dfs: list[pd.DataFrame | None], fallback: list[str]) -> list[str]:
+    """把若干张表的 month 列并成一条连续的月份轴。"""
+    got = [str(m) for df in dfs if df is not None and "month" in df.columns
+           for m in df["month"].astype(str)]
+    if not got:
+        return list(fallback)
+    lo, hi = min(min(got), fallback[0]), max(max(got), fallback[-1])
+    out, cur = [], pd.Period(lo, freq="M")
+    stop = pd.Period(hi, freq="M")
+    while cur <= stop:
+        out.append(str(cur))
+        cur += 1
+    return out
+
+
 def _month_label(df: pd.DataFrame) -> list[str]:
     return df["date"].dt.strftime("%Y-%m").tolist()
 
@@ -77,6 +92,7 @@ def build_dashboard_html(dirpath: Path) -> str:
     landreg = _load_landreg_csv(dirpath)
     pending_df = _load_optional_csv(dirpath, "pending_presale_monthly.csv")
     ccl_df = _load_optional_csv(dirpath, "ccl_monthly.csv")
+    landreg_full = _load_optional_csv(dirpath, "landreg_full_monthly.csv")
     echarts_src = resolve_echarts_src(dirpath)
 
     # 合并月度批出 / 成交，统一用 YYYY-MM 字符串作 key
@@ -97,9 +113,34 @@ def build_dashboard_html(dirpath: Path) -> str:
     inv_vals = [None if pd.isna(v) else int(v) for v in inv["instant_saleable_inventory"]]
     pending_vals = [None if v is None else int(v)
                     for v in _series_by_month(pending_df, months, "pending_units")]
-    ccl_vals = _series_by_month(ccl_df, months, "ccl")
-    secondary_vals = [0 if v is None else int(v)
-                      for v in _series_by_month(landreg, months, "secondary_units")]
+
+    # 底部那张图用自己的长横轴：CCL 从 1994 起、二手成交从 2002 起，
+    # 不跟着库存区间（2016 起）截断。柱子在没数据的年份留空即可。
+    # 年度成交：伙数与金额（t2.json 的 $ million -> 億）
+    yr_labels: list[str] = []
+    yr_pri_units: list[int] = []
+    yr_sec_units: list[int] = []
+    yr_pri_amt: list[float] = []
+    yr_sec_amt: list[float] = []
+    if landreg_full is not None and "primary_amount_hkm" in landreg_full.columns:
+        f = landreg_full.copy()
+        f["year"] = f["month"].astype(str).str[:4]
+        agg = f.groupby("year", as_index=False).sum(numeric_only=True)
+        yr_labels = agg["year"].tolist()
+        yr_pri_units = [int(v) for v in agg["primary_units"]]
+        yr_sec_units = [int(v) for v in agg["secondary_units"]]
+        yr_pri_amt = [round(v / 100, 1) for v in agg["primary_amount_hkm"]]
+        yr_sec_amt = [round(v / 100, 1) for v in agg["secondary_amount_hkm"]]
+
+    long_months = _union_months([ccl_df, landreg_full], fallback=months)
+    ccl_vals = _series_by_month(ccl_df, long_months, "ccl")
+    secondary_vals = [None if v is None else int(v)
+                      for v in _series_by_month(landreg_full, long_months, "secondary_units")]
+    # 月末官方未发布时 CSV 里补的是 0，画成零高柱会误导
+    for i in range(len(secondary_vals) - 1, -1, -1):
+        if secondary_vals[i]:
+            break
+        secondary_vals[i] = None
     presale_vals = [int(v) for v in monthly["presale_approved_units"]]
     primary_vals = [int(v) for v in monthly["primary_units"]]
 
@@ -151,14 +192,11 @@ def build_dashboard_html(dirpath: Path) -> str:
     # 月末那几个月官方还没发布，CSV 里补的是 0。画成 0 会变成一根假的零高柱、
     # 以及一段假的库存平台，所以画图时截断成 null（CCL / 待批各自有真实覆盖，不动）。
     data_end = len(months) - 1
-    while data_end >= 0 and not (
-        presale_vals[data_end] or primary_vals[data_end] or secondary_vals[data_end]
-    ):
+    while data_end >= 0 and not (presale_vals[data_end] or primary_vals[data_end]):
         data_end -= 1
     for i in range(data_end + 1, len(months)):
         presale_vals[i] = None
         primary_vals[i] = None
-        secondary_vals[i] = None
         inv_vals[i] = None
 
     from datetime import datetime
@@ -166,7 +204,10 @@ def build_dashboard_html(dirpath: Path) -> str:
 
     data = {
         "months": months, "inv": inv_vals,
-        "pending": pending_vals, "ccl": ccl_vals, "secondary": secondary_vals,
+        "pending": pending_vals,
+        "long_months": long_months, "ccl": ccl_vals, "secondary": secondary_vals,
+        "yr_labels": yr_labels, "yr_pri_units": yr_pri_units, "yr_sec_units": yr_sec_units,
+        "yr_pri_amt": yr_pri_amt, "yr_sec_amt": yr_sec_amt,
         "presale": presale_vals, "primary": primary_vals,
         "q_keys": q_keys, "q_presale": q_presale, "q_primary": q_primary,
         "m_annual": m_annual, "q_annual": q_annual,
@@ -256,7 +297,12 @@ def build_dashboard_html(dirpath: Path) -> str:
     </div>
 
     <div class="chart-card">
-      <h2>中原城市领先指数 CCL 与二手成交（月度 · 上下分区共用横轴，默认近 3 年）</h2>
+      <h2>每年一手 / 二手成交（上下分区共用年份轴 · 上为成交金额，下为成交单位数，自 2002 年；最后一年为年初至今）</h2>
+      <div id="chart-year" class="chart"></div>
+    </div>
+
+    <div class="chart-card">
+      <h2>中原城市领先指数 CCL 与二手成交（上下分区共用横轴 · CCL 自 1994 年、二手成交自 2002 年，默认近 3 年，可拖到最早）</h2>
       <div id="chart-second" class="chart"></div>
     </div>
   </div>
@@ -399,7 +445,9 @@ def build_dashboard_html(dirpath: Path) -> str:
   // 两者量纲差三个数量级（指数 ~150 vs 伙数 ~5000），叠在左右轴上互相压扁，
   // 所以拆成上下两个 grid，只共享 x 轴。
   var secondChart = echarts.init(document.getElementById('chart-second'));
-  var secondXAxis = {{ type: 'category', data: D.months, boundaryGap: false }};
+  var secondXAxis = {{ type: 'category', data: D.long_months, boundaryGap: false }};
+  var longTot = D.long_months.length;
+  var longZoomStart = Math.max(0, (longTot - 36) / longTot * 100);
   secondChart.setOption({{
     tooltip: {{
       trigger: 'axis',
@@ -432,8 +480,8 @@ def build_dashboard_html(dirpath: Path) -> str:
          splitLine: {{ lineStyle: {{ type: 'dashed' }} }} }}
     ],
     dataZoom: [
-      {{ type: 'inside', xAxisIndex: [0, 1], start: zoomStart, end: 100 }},
-      {{ type: 'slider', xAxisIndex: [0, 1], height: 16, bottom: 4, start: zoomStart, end: 100 }}
+      {{ type: 'inside', xAxisIndex: [0, 1], start: longZoomStart, end: 100 }},
+      {{ type: 'slider', xAxisIndex: [0, 1], height: 16, bottom: 4, start: longZoomStart, end: 100 }}
     ],
     series: [
       {{
@@ -451,9 +499,56 @@ def build_dashboard_html(dirpath: Path) -> str:
     ]
   }});
 
+  // ---------- 年度成交：上金额（億）、下单位数（伙），共用年份横轴 ----------
+  var yearChart = echarts.init(document.getElementById('chart-year'));
+  var yearXAxis = {{ type: 'category', data: D.yr_labels }};
+  yearChart.setOption({{
+    tooltip: {{
+      trigger: 'axis',
+      axisPointer: {{ type: 'shadow', link: [{{ xAxisIndex: 'all' }}] }},
+      formatter: function(ps) {{
+        var s = ps[0].axisValue + ' 年<br/>';
+        ps.forEach(function(p){{
+          if (p.value == null) return;
+          var unit = (p.seriesName.indexOf('金额') >= 0) ? ' 億' : ' 伙';
+          s += p.marker + p.seriesName + ': <b>' + Number(p.value).toLocaleString() + '</b>' + unit + '<br/>';
+        }});
+        return s;
+      }}
+    }},
+    legend: {{ data: ['一手金额', '二手金额', '一手单位数', '二手单位数'], top: 0 }},
+    axisPointer: {{ link: [{{ xAxisIndex: 'all' }}] }},
+    grid: [
+      {{ left: 66, right: 40, top: 34, height: '34%' }},
+      {{ left: 66, right: 40, top: '56%', height: '30%' }}
+    ],
+    xAxis: [
+      Object.assign({{}}, yearXAxis, {{ gridIndex: 0, axisLabel: {{ show: false }}, axisTick: {{ show: false }} }}),
+      Object.assign({{}}, yearXAxis, {{ gridIndex: 1, axisLabel: {{ rotate: 45, fontSize: 10 }} }})
+    ],
+    yAxis: [
+      {{ type: 'value', name: '成交金额（億）', nameGap: 16, gridIndex: 0, splitLine: {{ lineStyle: {{ type: 'dashed' }} }} }},
+      {{ type: 'value', name: '成交单位数（伙）', nameGap: 16, gridIndex: 1, splitLine: {{ lineStyle: {{ type: 'dashed' }} }} }}
+    ],
+    dataZoom: [
+      {{ type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 }},
+      {{ type: 'slider', xAxisIndex: [0, 1], height: 14, bottom: 4, start: 0, end: 100 }}
+    ],
+    series: [
+      {{ name: '一手金额', type: 'bar', xAxisIndex: 0, yAxisIndex: 0, data: D.yr_pri_amt,
+         itemStyle: {{ color: '#d62728' }}, barMaxWidth: 18 }},
+      {{ name: '二手金额', type: 'bar', xAxisIndex: 0, yAxisIndex: 0, data: D.yr_sec_amt,
+         itemStyle: {{ color: '#7f7fd5' }}, barMaxWidth: 18 }},
+      {{ name: '一手单位数', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: D.yr_pri_units,
+         itemStyle: {{ color: '#d62728' }}, barMaxWidth: 18 }},
+      {{ name: '二手单位数', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: D.yr_sec_units,
+         itemStyle: {{ color: '#7f7fd5' }}, barMaxWidth: 18 }}
+    ]
+  }});
+
   window.addEventListener('resize', function(){{
     annualChart.resize(); invChart.resize(); flowChart.resize();
-    qChart.resize(); secondChart.resize();
+    qChart.resize(); secondChart.resize(); yearChart.resize();
   }});
 
   // 标签页在手机上常常一开就是好几天。切回来且距上次加载超过 10 分钟就自己刷新，

@@ -34,6 +34,11 @@ LANDREG_INDEX = f"{LANDREG_BASE}/tc/monthly/agreement.htm"
 LANDREG_JSON_DIR = f"{LANDREG_BASE}/json/monthly_agt-pri"
 LANDREG_PRIMARY_KEY = "Number of Primary Sales for ASP Residential Building Units"
 LANDREG_SECONDARY_KEY = "Number of Secondary Sales for ASP Residential Building Units"
+# t2.json 是合约金额，页面标题写明 Consideration ($ million)，即港币百万
+LANDREG_PRIMARY_AMT_KEY = "Consideration of Primary Sales for ASP Residential Building Units"
+LANDREG_SECONDARY_AMT_KEY = "Consideration of Secondary Sales for ASP Residential Building Units"
+LANDREG_UNIT_COLS = ("primary_units", "secondary_units")
+LANDREG_AMT_COLS = ("primary_amount_hkm", "secondary_amount_hkm")
 
 # 待批预售楼花同意书（住宅）：地政总署按月归档，每月一份 PDF，末页「Summary」有合计。
 # 用英文版：中文版 2016/2017 的措辞和现在不一样，英文版十年来只换过一个词。
@@ -218,21 +223,20 @@ def build_presale_approvals_monthly(
 
 
 def _landreg_rows_to_frame(
-    rows: dict[tuple[int, int], dict[str, int]], start: date, end: date
+    rows: dict[tuple[int, int], dict[str, int]],
+    start: date,
+    end: date,
+    cols: tuple[str, ...] = LANDREG_UNIT_COLS,
 ) -> pd.DataFrame:
     df = pd.DataFrame(
         [
-            {
-                "month": f"{y:04d}-{m:02d}",
-                "primary_units": v.get("primary_units"),
-                "secondary_units": v.get("secondary_units"),
-            }
+            {"month": f"{y:04d}-{m:02d}", **{c: v.get(c) for c in cols}}
             for (y, m), v in rows.items()
         ]
     )
     months = [month_str(d) for d in month_range_inclusive(start, end)]
     df = pd.DataFrame({"month": months}).merge(df, on="month", how="left")
-    for c in ("primary_units", "secondary_units"):
+    for c in cols:
         df[c] = df[c].fillna(0).astype(int)
     return df
 
@@ -259,7 +263,9 @@ def fetch_landreg_primary_periods(s: requests.Session) -> list[tuple[str, str]]:
     return periods
 
 
-def build_landreg_primary_monthly_via_json(start: date, end: date) -> pd.DataFrame:
+def build_landreg_primary_monthly_via_json(
+    start: date, end: date, full_csv: Path | None = None
+) -> pd.DataFrame:
     """直接取年份段页面背后的 t1.json，字段自带 Year / Month，不必推年份。"""
     s = _requests_session(referer=LANDREG_INDEX)
     periods = fetch_landreg_primary_periods(s)
@@ -283,9 +289,37 @@ def build_landreg_primary_monthly_via_json(start: date, end: date) -> pd.DataFra
                 continue
             rows[(y, mo)] = {"primary_units": pri, "secondary_units": sec or 0}
             got += 1
-        print(f"  土地注册处 {title}（{slug}）: {got} 个月")
+
+        # t2.json 是同一批年份段的合约金额，字段对齐 t1
+        r2 = _http_get(s, f"{LANDREG_JSON_DIR}/{slug}/t2.json", timeout=60)
+        amt = 0
+        if r2.status_code == 200:
+            for rec in r2.json():
+                y = _to_int_safe(rec.get("Year"))
+                mo = _to_int_safe(rec.get("Month"))
+                if y is None or mo is None or not (1 <= mo <= 12):
+                    continue
+                if (y, mo) not in rows:
+                    continue
+                rows[(y, mo)]["primary_amount_hkm"] = (
+                    _to_int_safe(rec.get(LANDREG_PRIMARY_AMT_KEY)) or 0
+                )
+                rows[(y, mo)]["secondary_amount_hkm"] = (
+                    _to_int_safe(rec.get(LANDREG_SECONDARY_AMT_KEY)) or 0
+                )
+                amt += 1
+        print(f"  土地注册处 {title}（{slug}）: 伙数 {got} 个月, 金额 {amt} 个月")
 
     _assert_landreg_coverage(rows, start, end)
+    if full_csv is not None:
+        first = min(date(y, m, 1) for (y, m) in rows)
+        _landreg_rows_to_frame(
+            rows,
+            first,
+            max(end, max(date(y, m, 1) for (y, m) in rows)),
+            cols=LANDREG_UNIT_COLS + LANDREG_AMT_COLS,
+        ).to_csv(full_csv, index=False, encoding="utf-8-sig")
+        print(f"  土地注册处全量历史 -> {full_csv.name}（{month_str(first)} 起）")
     return _landreg_rows_to_frame(rows, start, end)
 
 
@@ -313,10 +347,11 @@ def build_landreg_primary_monthly(
     *,
     allow_selenium: bool = True,
     headless: bool = True,
+    full_csv: Path | None = None,
 ) -> pd.DataFrame:
     """优先走 JSON 通道；失败再回退到 Selenium 抓渲染后的表格。"""
     try:
-        return build_landreg_primary_monthly_via_json(start, end)
+        return build_landreg_primary_monthly_via_json(start, end, full_csv=full_csv)
     except Exception as e:
         if not allow_selenium:
             raise
@@ -618,7 +653,7 @@ def build_pending_presale_monthly(
     return out
 
 
-def fetch_ccl_monthly(start: date, end: date) -> pd.DataFrame:
+def fetch_ccl_monthly() -> pd.DataFrame:
     """中原城市领先指数 CCL：周度序列取每月最后一个观测值作为该月时点数。"""
     s = _requests_session(referer=CCL_REFERER)
     r = _http_get(s, CCL_CHART_URL, timeout=90)
@@ -640,10 +675,13 @@ def fetch_ccl_monthly(start: date, end: date) -> pd.DataFrame:
     last["obs_date"] = last["obs_date"].dt.strftime("%Y-%m-%d")
     last["ccl"] = last["ccl"].astype(float).round(2)
 
-    months = [month_str(d) for d in month_range_inclusive(start, end)]
+    # 全量返回：看板底部那张图用自己的长横轴，不跟着库存区间截断
+    first = parse_month(last["month"].min())
+    lastm = parse_month(last["month"].max())
+    months = [month_str(d) for d in month_range_inclusive(first, lastm)]
     out = pd.DataFrame({"month": months}).merge(last, on="month", how="left")
-    got = int(out["ccl"].notna().sum())
-    print(f"  中原城市领先指数 CCL: 全量 {len(obs)} 个周度点，区间内 {got}/{len(out)} 个月有值")
+    print(f"  中原城市领先指数 CCL: {len(obs)} 个周度点 -> {len(out)} 个月"
+          f"（{out['month'].iloc[0]} ~ {out['month'].iloc[-1]}）")
     return out
 
 
@@ -744,6 +782,7 @@ def main() -> None:
             end=end,
             allow_selenium=not args.no_landreg_selenium,
             headless=not args.selenium_visible,
+            full_csv=out_dir / "landreg_full_monthly.csv",
         )
 
     sales.to_csv(out_dir / "landreg_primary_monthly.csv", index=False, encoding="utf-8-sig")
@@ -758,7 +797,7 @@ def main() -> None:
     except Exception as e:
         print(f"  [待批] 获取失败，本次跳过: {e}")
     try:
-        ccl = fetch_ccl_monthly(start, end)
+        ccl = fetch_ccl_monthly()
         ccl.to_csv(out_dir / "ccl_monthly.csv", index=False, encoding="utf-8-sig")
     except Exception as e:
         print(f"  [CCL] 获取失败，本次跳过: {e}")
