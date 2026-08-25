@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import math
 import re
@@ -29,6 +30,12 @@ ARCGIS_LAYER_URL = (
 #     "https://portal.csdi.gov.hk/server/rest/services/common/"
 #     "landsd_rcd_1637222762687_21369/FeatureServer/0"
 # )
+
+LANDREG_BASE = "https://www.landreg.gov.hk"
+LANDREG_INDEX = f"{LANDREG_BASE}/tc/monthly/agreement.htm"
+# 年份段页面背后的数据源；t1.json = 单位数，t2.json = 合约金额
+LANDREG_JSON_DIR = f"{LANDREG_BASE}/json/monthly_agt-pri"
+LANDREG_PRIMARY_KEY = "Number of Primary Sales for ASP Residential Building Units"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR = PROJECT_DIR / "out_inventory"
@@ -60,22 +67,35 @@ def month_range_inclusive(start: date, end: date) -> list[date]:
     return out
 
 
-def _requests_session() -> requests.Session:
+def _requests_session(referer: str = "https://portal.csdi.gov.hk/geoportal/") -> requests.Session:
     s = requests.Session()
     s.headers.update(
         {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
-            "Referer": "https://portal.csdi.gov.hk/geoportal/",
+            "Referer": referer,
             "Accept": "application/json,text/plain,*/*",
         }
     )
     return s
 
 
+def _http_get(s: requests.Session, url: str, **kw) -> requests.Response:
+    """本机全局代理常把港府站点的隧道挡掉，连不上时自动绕过代理直连重试一次。"""
+    try:
+        return s.get(url, **kw)
+    except requests.exceptions.RequestException:
+        if not s.trust_env:
+            raise
+        print("  [网络] 经代理访问失败，改为直连重试 …")
+        s.trust_env = False
+        s.proxies = {}
+        return s.get(url, **kw)
+
+
 def fetch_arcgis_layer_fields(layer_url: str) -> pd.DataFrame:
     s = _requests_session()
-    r = s.get(f"{layer_url}?f=pjson", timeout=60)
+    r = _http_get(s, f"{layer_url}?f=pjson", timeout=60)
     r.raise_for_status()
     fields = r.json().get("fields", [])
     return pd.DataFrame(
@@ -99,7 +119,7 @@ def fetch_arcgis_features_all(
     sleep_s: float = 0.05,
 ) -> list[dict]:
     s = _requests_session()
-    meta = s.get(f"{layer_url}?f=pjson", timeout=60)
+    meta = _http_get(s, f"{layer_url}?f=pjson", timeout=60)
     meta.raise_for_status()
     meta_j = meta.json()
     max_rc = int(meta_j.get("maxRecordCount", page_size) or page_size)
@@ -118,7 +138,7 @@ def fetch_arcgis_features_all(
             "resultRecordCount": page_size,
             "f": "json",
         }
-        r = s.get(f"{layer_url}/query", params=params, timeout=120)
+        r = _http_get(s, f"{layer_url}/query", params=params, timeout=120)
         r.raise_for_status()
         feats = r.json().get("features") or []
         if not feats:
@@ -177,6 +197,104 @@ def build_presale_approvals_monthly(
     return out
 
 
+def _landreg_rows_to_frame(
+    rows: dict[tuple[int, int], int], start: date, end: date
+) -> pd.DataFrame:
+    df = pd.DataFrame(
+        [{"month": f"{y:04d}-{m:02d}", "primary_units": v} for (y, m), v in rows.items()]
+    )
+    months = [month_str(d) for d in month_range_inclusive(start, end)]
+    df = pd.DataFrame({"month": months}).merge(df, on="month", how="left")
+    df["primary_units"] = df["primary_units"].fillna(0).astype(int)
+    return df
+
+
+def fetch_landreg_primary_periods(s: requests.Session) -> list[tuple[str, str]]:
+    """取「一手及二手买卖」类别下的全部年份段。
+
+    年份段清单以 `var pastStatJson=[...]` 内联在主页里，不需要渲染 JS。
+    返回 [(显示文本, 页面 slug)]，顺序同页面：新的在前。
+    """
+    html = _http_get(s, LANDREG_INDEX, timeout=60).text
+    m = re.search(r"var\s+pastStatJson\s*=\s*(\[.*?\])\s*\n\s*pastStatInit", html, re.S)
+    if not m:
+        raise RuntimeError("主页未找到 pastStatJson，土地注册处页面结构可能已变。")
+    periods: list[tuple[str, str]] = []
+    for cat in json.loads(m.group(1)):
+        for b in cat.get("buttons") or []:
+            slug = str(b.get("link_url") or "").rsplit("/", 1)[-1]
+            if slug.endswith(".htm"):
+                slug = slug[: -len(".htm")]
+            # 一手成交系列：当年为 agt-primary，历史段为 agt-pri-N
+            if slug == "agt-primary" or slug.startswith("agt-pri-"):
+                periods.append((str(b.get("title") or "").strip(), slug))
+    return periods
+
+
+def build_landreg_primary_monthly_via_json(start: date, end: date) -> pd.DataFrame:
+    """直接取年份段页面背后的 t1.json，字段自带 Year / Month，不必推年份。"""
+    s = _requests_session(referer=LANDREG_INDEX)
+    periods = fetch_landreg_primary_periods(s)
+    if not periods:
+        raise RuntimeError("未找到一手成交年份段，土地注册处页面结构可能已变。")
+
+    rows: dict[tuple[int, int], int] = {}
+    # 从最老的年份段开始写，新段覆盖旧段：重叠月份以最新一版为准
+    for title, slug in reversed(periods):
+        r = _http_get(s, f"{LANDREG_JSON_DIR}/{slug}/t1.json", timeout=60)
+        if r.status_code != 200:
+            print(f"  土地注册处 {title}（{slug}）: HTTP {r.status_code}，跳过")
+            continue
+        got = 0
+        for rec in r.json():
+            y = _to_int_safe(rec.get("Year"))
+            mo = _to_int_safe(rec.get("Month"))  # 年合计行的 Month 是 "Total"
+            v = _to_int_safe(rec.get(LANDREG_PRIMARY_KEY))
+            if y is None or mo is None or v is None or not (1 <= mo <= 12):
+                continue
+            rows[(y, mo)] = v
+            got += 1
+        print(f"  土地注册处 {title}（{slug}）: {got} 个月")
+
+    _assert_landreg_coverage(rows, start, end)
+    return _landreg_rows_to_frame(rows, start, end)
+
+
+def _assert_landreg_coverage(
+    rows: dict[tuple[int, int], int], start: date, end: date
+) -> None:
+    """抓漏了就报错，让上层回退 Selenium —— 静默补 0 会直接污染回推结果。"""
+    if not rows:
+        raise RuntimeError("土地注册处一手成交为空。")
+    latest = max(date(y, m, 1) for (y, m) in rows)
+    if latest < (end + relativedelta(months=-3)).replace(day=1):
+        raise RuntimeError(f"土地注册处数据只到 {month_str(latest)}，距 {month_str(end)} 太远。")
+    wanted = [d for d in month_range_inclusive(start, min(end, latest))]
+    missing = [d for d in wanted if (d.year, d.month) not in rows]
+    if missing:
+        raise RuntimeError(
+            f"{month_str(start)}~{month_str(min(end, latest))} 缺 {len(missing)} 个月，"
+            f"例如 {', '.join(month_str(d) for d in missing[:6])}"
+        )
+
+
+def build_landreg_primary_monthly(
+    start: date,
+    end: date,
+    *,
+    allow_selenium: bool = True,
+    headless: bool = True,
+) -> pd.DataFrame:
+    """优先走 JSON 通道；失败再回退到 Selenium 抓渲染后的表格。"""
+    try:
+        return build_landreg_primary_monthly_via_json(start, end)
+    except Exception as e:
+        if not allow_selenium:
+            raise
+        print(f"  [landreg] JSON 通道失败（{e}），回退 Selenium …")
+        return build_landreg_primary_monthly_via_selenium(start, end, headless=headless)
+
+
 def build_landreg_primary_monthly_via_selenium(
     start: date,
     end: date,
@@ -220,6 +338,19 @@ def build_landreg_primary_monthly_via_selenium(
         """
     )
 
+    def parse_period_range(text: str) -> tuple[int, int] | None:
+        text = text.strip()
+        if " - " in text:
+            try:
+                a, b = map(int, text.split(" - ", 1))
+                return a, b
+            except ValueError:
+                return None
+        if re.fullmatch(r"20\d{2}", text):
+            y = int(text)
+            return y, y
+        return None
+
     periods = []
     for row in link_rows:
         href = (row.get("href") or "").strip()
@@ -241,19 +372,6 @@ def build_landreg_primary_monthly_via_selenium(
 
     pattern = re.compile(r"t([12])Y(\d+)r(\d+)_td(\d+)$")
     rows: dict[tuple[int, int], int] = {}
-
-    def parse_period_range(text: str) -> tuple[int, int] | None:
-        text = text.strip()
-        if " - " in text:
-            try:
-                a, b = map(int, text.split(" - ", 1))
-                return a, b
-            except ValueError:
-                return None
-        if re.fullmatch(r"20\d{2}", text):
-            y = int(text)
-            return y, y
-        return None
 
     def calendar_year(start_year: int, end_year: int, y_index: int) -> int:
         if start_year == end_year:
@@ -315,13 +433,7 @@ def build_landreg_primary_monthly_via_selenium(
 
     driver.quit()
 
-    df = pd.DataFrame(
-        [{"month": f"{y:04d}-{m:02d}", "primary_units": v} for (y, m), v in rows.items()]
-    )
-    months = [month_str(d) for d in month_range_inclusive(start, end)]
-    df = pd.DataFrame({"month": months}).merge(df, on="month", how="left")
-    df["primary_units"] = df["primary_units"].fillna(0).astype(int)
-    return df
+    return _landreg_rows_to_frame(rows, start, end)
 
 
 # def build_pending_presale_monthly(
@@ -426,7 +538,8 @@ def main() -> None:
     ap.add_argument("--out-dir", type=str, default=str(DEFAULT_OUT_DIR),
                     help="输出目录，默认脚本同目录 out_inventory")
     ap.add_argument("--landreg-primary-csv", type=str, default=None)
-    ap.add_argument("--no-landreg-selenium", action="store_true")
+    ap.add_argument("--no-landreg-selenium", action="store_true",
+                    help="禁用 Selenium 回退，只走 JSON 通道")
     ap.add_argument("--selenium-visible", action="store_true", help="显示 Chrome（调试）")
     ap.add_argument("--dump-arcgis-fields", action="store_true")
     ap.add_argument("--skip-chart", action="store_true", help="不生成图表（仅本地调试时用）")
@@ -476,12 +589,13 @@ def main() -> None:
         months = [month_str(d) for d in month_range_inclusive(start, end)]
         sales = pd.DataFrame({"month": months}).merge(sales, on="month", how="left")
         sales["primary_units"] = sales["primary_units"].fillna(0).astype(int)
-    elif args.no_landreg_selenium:
-        raise ValueError("请提供 --landreg-primary-csv 或去掉 --no-landreg-selenium")
     else:
-        print("[2/3] 正在抓取土地注册处一手成交（Chrome）…")
-        sales = build_landreg_primary_monthly_via_selenium(
-            start=start, end=end, headless=not args.selenium_visible
+        print("[2/3] 正在获取土地注册处一手成交 …")
+        sales = build_landreg_primary_monthly(
+            start=start,
+            end=end,
+            allow_selenium=not args.no_landreg_selenium,
+            headless=not args.selenium_visible,
         )
 
     sales.to_csv(out_dir / "landreg_primary_monthly.csv", index=False, encoding="utf-8-sig")

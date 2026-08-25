@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-and-notify:
@@ -32,7 +32,9 @@ jobs:
           cache-dependency-path: requirements.txt
 
 
-      - name: Install Chrome
+      # 数据走土地注册处的 JSON 接口，正常路径用不到浏览器；
+      # 这一步只为 JSON 通道失效时的 Selenium 回退保底
+      - name: Install Chrome (fallback only)
         uses: browser-actions/setup-chrome@v1
 
       - name: Install dependencies
@@ -57,7 +59,17 @@ jobs:
           python run_daily.py
           if [ -f .baseline_updated ]; then
             echo "updated=true" >> "$GITHUB_OUTPUT"
+            echo "### 数据有更新 ✅" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### 数据无变化" >> "$GITHUB_STEP_SUMMARY"
           fi
+          {
+            echo ""
+            echo "最新一期："
+            echo '```'
+            tail -n 5 out_inventory/instant_saleable_inventory_monthly.csv
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Commit updated baseline
         if: steps.run.outputs.updated == 'true'
@@ -69,8 +81,11 @@ jobs:
           git push
 
       - name: Bundle dashboard for GitHub Pages
-        if: always()
         run: |
+          if [ ! -f out_inventory/dashboard.html ]; then
+            echo "dashboard.html 未生成，中止发布以保留线上现有页面" >&2
+            exit 1
+          fi
           mkdir -p pages_build/assets
           cp out_inventory/dashboard.html pages_build/index.html
           if [ -f out_inventory/assets/echarts.min.js ]; then
@@ -80,7 +95,6 @@ jobs:
           find pages_build -type f
 
       - name: Upload Pages artifact
-        if: always()
         uses: actions/upload-pages-artifact@v3
         with:
           path: pages_build

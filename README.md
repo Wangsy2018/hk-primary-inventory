@@ -9,7 +9,10 @@ pip install -r requirements.txt
 python 一手短期库存.py
 ```
 
-结果在 `out_inventory/`（含 Excel 与图表）。
+结果在 `out_inventory/`（含 Excel 与图表），整轮约 3 秒。
+
+> **本地开了代理（Clash / VPN）？** 港府两个数据源（`portal.csdi.gov.hk`、`www.landreg.gov.hk`）经代理常连不通。
+> 脚本会在代理失败时自动绕过代理直连重试，无需手动关代理。
 
 ## 部署到 GitHub + 每日自动运行
 
@@ -107,7 +110,7 @@ python chart_dashboard.py
 
 | 文件 | 作用 |
 |------|------|
-| `一手短期库存.py` | 主程序（本地完整运行 + 图表） |
+| `一手短期库存.py` | 主程序（本地完整运行 + 图表）；抓数优先 JSON 通道，失败回退 Selenium |
 | `chart_report.py` | 研报图表（季度/逐月横轴，与本地 `Inventory with chart.py` 一致；CI 用 Noto 字体路径加载） |
 | `chart_dashboard.py` | 生成交互式 HTML 看板（ECharts），供本地 / GitHub Pages 查看 |
 | `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
@@ -124,6 +127,7 @@ python chart_dashboard.py
 
 ## 注意事项
 
-- GitHub Actions 需 **Chrome** 抓土地注册处，workflow 已配置。
+- 土地注册处数据走其页面背后的 **JSON 接口**（`/json/monthly_agt-pri/<年份段>/t1.json`，字段自带 `Year` / `Month`），不需要浏览器。
+  workflow 里仍装 Chrome，只作为 JSON 接口失效时 **Selenium 回退**的保底；加 `--no-landreg-selenium` 可禁用回退。
 - 首次 push 后第一次 Action 只会**建立 baseline**，一般**不发邮件**；从第二次起才会在数据变化时通知。
 - 不要把 SMTP 密码写进代码，只用 GitHub Secrets。
