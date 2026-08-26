@@ -588,6 +588,8 @@ PENDING_DETAIL_CSV_URL = (
     "https://static.csdi.gov.hk/csdi-webpage/download/"
     "c84ee393122e5442985d6ce1cdddd162/csv"
 )
+# 只统计私人住宅市场；写法与 house730_inventory.EXCLUDED_DEVELOPERS 保持一致
+PENDING_EXCLUDED_VENDORS = ("hong kong housing society",)
 _PENDING_FIELD_MAP = {
     "lot": "NAME_EN",            # 地段编号，多期项目的合并键
     "address": "ADDRESS_EN",
@@ -611,13 +613,22 @@ def fetch_pending_projects(s: requests.Session) -> list[dict]:
         with zf.open(names[0]) as fh:
             df = pd.read_csv(fh)
 
-    out = []
+    out, dropped = [], []
     for rec in df.to_dict("records"):
         row = {k: ("" if pd.isna(rec.get(col)) else str(rec.get(col)).strip())
                for k, col in _PENDING_FIELD_MAP.items()}
         if not row["units"].replace(",", "").isdigit():
             continue
+        # 资助出售房屋不算私人市场货量。NSEARCH12_EN 直接标了 Subsidised Sale Flats，
+        # 卖方名单再兜一道，免得漏标。注意市建局(URA)不带这个标记，是公开市场发售，不剔。
+        if "subsid" in row["category"].lower() or \
+                any(k in row["vendor"].lower() for k in PENDING_EXCLUDED_VENDORS):
+            dropped.append(row)
+            continue
         out.append(row)
+    if dropped:
+        n = sum(int(r["units"].replace(",", "")) for r in dropped)
+        print(f"    剔除资助出售房屋 {len(dropped)} 宗申请 / {n:,} 伙")
     return out
 
 
@@ -685,13 +696,11 @@ def build_pending_projects(records: list[dict]) -> pd.DataFrame:
     for (lot, _dev), phases in groups.items():
         # 转成 ISO 再排，dd/mm/yyyy 直接按字符串排会把 30/06/2027 排在 30/11/2026 前面
         emds = sorted({iso(p["emd"]) for p in phases if iso(p.get("emd", ""))})
-        subsidised = any("subsid" in (p.get("category") or "").lower() for p in phases)
         rows.append({
             "project": _pending_display_name(phases),
             "phases": len(phases),
             "phase_names": " | ".join(p.get("name", "") or "—" for p in phases),
             "lot": lot,
-            "subsidised": subsidised,
             "address": next((p["address"] for p in phases
                              if p.get("address") and not p["address"].lower().startswith("pending")), ""),
             "vendor": phases[0].get("vendor", ""),
@@ -926,10 +935,9 @@ def main() -> None:
             latest = pending.dropna(subset=["pending_units"])["month"].max()
             want = int(pending.loc[pending["month"] == latest, "pending_units"].iloc[0]) \
                 if isinstance(latest, str) else None
-            flag = "对上" if got == want else f"与月报 {latest} 的 {want:,} 不同（快照日更新）"
-            sub_n = int(proj["subsidised"].sum())
-            print(f"  待批明细: {len(recs)} 条申请 -> {len(proj)} 个项目, {got:,} 伙"
-                  f"（其中资助出售房屋 {sub_n} 个项目），与月报 Summary {flag}")
+
+            print(f"  待批明细: {len(recs)} 宗申请 -> {len(proj)} 个项目, {got:,} 伙"
+                  f"（已剔除资助房屋），月报 Summary 含资助为 {want:,} 伙")
     except Exception as e:
         print(f"  [待批] 获取失败，本次跳过: {e}")
     try:

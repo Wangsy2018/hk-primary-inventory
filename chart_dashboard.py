@@ -244,7 +244,6 @@ def build_dashboard_html(dirpath: Path) -> str:
                 "vendor": str(r.get("vendor", "")),
                 "units": int(r.get("pending_units") or 0),
                 "emd": str(r.get("estimated_material_date", "")),
-                "sub": bool(r.get("subsidised")),
             })
         pending_market = {
             "projects": len(pending_projects),
@@ -325,7 +324,6 @@ def build_dashboard_html(dirpath: Path) -> str:
   table.pl td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   table.pl td.nm {{ white-space: normal; min-width: 190px; font-weight: 600; color: #1f3a5f; }}
   table.pl tbody tr:hover {{ background: #f8fbff; }}
-  .tag--sub {{ background: #fef3c7; color: #b45309; }}
   .tag {{ display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 20px;
          background: #eef2ff; color: #4f46e5; margin-left: 6px; font-weight: 600; }}
   .pctcell {{ display: flex; align-items: center; justify-content: flex-end; gap: 8px; }}
@@ -780,9 +778,8 @@ def build_dashboard_html(dirpath: Path) -> str:
       var tag = p.phases > 1
         ? '<span class="tag" title="' + esc(p.phase_names) + '">' + p.phases + ' 期</span>' : '';
       // 资助出售房屋不属于私人市场货量，标出来
-      var sub = p.sub ? '<span class="tag tag--sub">资助</span>' : '';
       return '<tr>'
-        + '<td class="nm" title="' + esc(p.phase_names) + '">' + p.name + tag + sub + '</td>'
+        + '<td class="nm" title="' + esc(p.phase_names) + '">' + p.name + tag + '</td>'
         + '<td class="num"><b>' + num(p.units) + '</b></td>'
         + '<td>' + (p.emd || '—') + '</td>'
         + '<td>' + (p.lot || '—') + '</td>'
