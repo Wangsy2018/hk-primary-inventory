@@ -124,11 +124,12 @@ python chart_dashboard.py
 | 文件 | 作用 |
 |------|------|
 | `一手短期库存.py` | 主程序：抓四个数据源 + 锚点回推，输出 CSV/Excel |
+| `house730_inventory.py` | 抓 house730 逐盘在售货量，输出 `projects_inventory.csv` |
 | `chart_dashboard.py` | 生成交互式 HTML 看板（ECharts），本地 / GitHub Pages 共用；**唯一的图表产物** |
 | `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
 | `notify_utils.py` | 数据 diff 与 SMTP 发信 |
 | `data/baseline/` | 上次确认的数据快照（提交到 Git），用于判断「是否有更新」 |
-| `data/history/` | 待批预售楼花的逐月历史（提交到 Git），避免每天重下 100+ 份 PDF |
+| `data/history/` | 待批预售楼花逐月历史、house730 日期缓存与上次成功的项目表（均提交到 Git） |
 | `assets/echarts.min.js` | 内嵌的 ECharts 库（网页版离线可用） |
 | `.github/workflows/daily.yml` | GitHub Actions 定时任务 |
 
@@ -144,6 +145,7 @@ python chart_dashboard.py
 | 一手 / 二手成交金额 | 土地注册处 `t2.json`（$ million） | 2002-01 | 月 |
 | 待批预售楼花单位数 | 地政总署月报 PDF `t2_YYMM.pdf` | 2013-01 | 月末时点 |
 | 中原城市领先指数 CCL | 中原 `CCLChart` 接口 | 1993-12 | 周（取月末） |
+| 逐盘在售货量 | house730 `api.house730.com` | 当前快照 | 日 |
 
 ### 1. 预售批出伙数 —— CSDI ArcGIS
 
@@ -245,6 +247,52 @@ GET 即可，返回 `rawData`，其中 `ccl` 是周度指数值，`realContractE
 
 按 `realContractEndDate` 归月，**取每月最后一个观测**作为该月的月末时点数，
 输出 `ccl_monthly.csv` 时**不截断**（1994-01 起全量），看板底部两张图用自己的长横轴。
+
+### 5. 逐盘在售货量 —— house730
+
+看板 KPI 第二格「当前市场在售货量」和点开的项目列表，数据来自 house730。
+
+**不要爬 `www.house730.com`**：那个站在 Cloudflare 后面，首次请求 403、跑完 JS 挑战才 200，
+所以只能上 Selenium 加长延迟。但它是个 Nuxt 应用，数据来自 `api.house730.com`，
+且 URL 上那个 `appsignature` **服务端根本不校验**（填错、不填都照样返回）。三个接口：
+
+| 接口 | 用途 |
+|------|------|
+| `POST /NewEstate/SearchNewEstate`（body `{pageIndex, pageCount}`） | 全部期数，一页 100 条；已带英文地址与 main developer |
+| `GET /NewEstate/GetNewEstateSaleProcess?estateId=` | 首次出售日期、Estimated Material Date |
+| `GET /NewEstate/GetNewEstateRoomById?estateId=` | 逐单位状态，`status=="2"` 即已售 |
+
+公共参数 `language=en-us&platform=pc&cityen=hk&appkey=730responsive`；
+`language=zh-hk` 可拿到中文名与中文地址（合并时两边互补）。
+
+> **API 会限流，而且惩罚很重。** 它也在 Cloudflare 后面，只是只做速率限制：
+> 突发几十次就返回 `Just a moment...` 挑战页（HTTP 429）。开发期间被封过两次，
+> 第二次**只发了 16 次请求就触发**，且持续 10 分钟以上。
+> 所以代码里有全局熔断闸（任何线程吃到 429 就把所有线程一起按住 —— 各自退避没用，
+> 退避期间别的线程还在把令牌桶打空）、0.12 秒基础间隔，失败重试到底仍失败**直接抛错**。
+
+**期数合并成项目**：`build_projects()` 用并查集，判据是「main developer 词集合重合度 ≥ 0.6
+且中英文地址任一能对上」。地址有三种脏法，都踩过：
+
+- 英文地址栏里存的是中文（Victoria Voyage Phase 1B 是「承豐道18號」，同项目其余三期是 "18 Shing Fung Road"）
+- 带区名后缀（`19 shing fung road` vs `19 shing fung road kai tak`）
+- 门牌写法不一（`No. 1 Wetland Park` vs `1 Wetland Park Road`），以及录入错字（`O1 Lohas Park Road`）
+
+发展商必须按词比而不是整串比：Villa Garda 两期一个写 `MTR，SINO LAND，K.WAH & CHINA MERCHANTS`、
+另一个写 `MTR，SINO，K.WAH & CHINA MERCHANTS`，差一个 LAND。阈值 0.6 是为了扛住康城路1號 ——
+那一个地址底下有 5 家不同发展商的盘，放宽到「同地址即合并」会全糊在一起。
+
+**只放已开售项目**：项目里任何一期有 First Sales Date 即算已开售；市场余货加总也只算这些项目。
+
+**日期落盘缓存**：已开售期数的首次出售日期不会再变，抓过就存进
+`data/history/house730_sale_process.csv`；每天只补新增期数和**还没开售的期数**
+（它们随时可能开售）。当前 769 期里 243 期已有日期、526 期待开售，
+所以次日请求量约 **16（列表）+ 526（待开售复查）+ 256（单位状态）≈ 800 次**，
+比全量的 1040 次省下已开售那一截，且这一截会随着开售项目增多而继续变大。
+按 0.12 秒基础间隔算整轮约 100 秒。`--refresh-dates` 可强制全量重抓。
+
+`run_daily.py` 里这一步失败会回退到 `data/history/house730_projects_inventory.csv`
+（上次成功的结果），不让整块看板消失。
 
 ### 通用：本机代理会挡掉港府站点
 

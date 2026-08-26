@@ -93,6 +93,7 @@ def build_dashboard_html(dirpath: Path) -> str:
     pending_df = _load_optional_csv(dirpath, "pending_presale_monthly.csv")
     ccl_df = _load_optional_csv(dirpath, "ccl_monthly.csv")
     landreg_full = _load_optional_csv(dirpath, "landreg_full_monthly.csv")
+    projects_df = _load_optional_csv(dirpath, "projects_inventory.csv")
     echarts_src = resolve_echarts_src(dirpath)
 
     # 合并月度批出 / 成交，统一用 YYYY-MM 字符串作 key
@@ -199,6 +200,34 @@ def build_dashboard_html(dirpath: Path) -> str:
         primary_vals[i] = None
         inv_vals[i] = None
 
+    # house730 逐盘在售货量：KPI 第二格 + 点开的项目列表
+    projects: list[dict] = []
+    market = {"projects": 0, "phases": 0, "total": 0, "sold": 0, "remaining": 0}
+    if projects_df is not None and not projects_df.empty:
+        pf = projects_df.fillna("")
+        for r in pf.to_dict("records"):
+            projects.append({
+                "name": str(r.get("project", "")),
+                "phases": int(r.get("phases") or 0),
+                "phase_names": str(r.get("phase_names", "")),
+                "developer": str(r.get("main_developer", "")),
+                "address": str(r.get("address", "")),
+                "total": int(r.get("total_units") or 0),
+                "sold": int(r.get("sold_units") or 0),
+                "left": int(r.get("remaining_units") or 0),
+                "pct": float(r.get("remaining_pct") or 0),
+                "first": str(r.get("first_sales_date", "")),
+                "months": int(r.get("months_since_launch") or 0),
+                "emd": str(r.get("estimated_material_date", "")),
+            })
+        market = {
+            "projects": len(projects),
+            "phases": int(pf["phases"].sum()),
+            "total": int(pf["total_units"].sum()),
+            "sold": int(pf["sold_units"].sum()),
+            "remaining": int(pf["remaining_units"].sum()),
+        }
+
     from datetime import datetime
     last_update = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -208,6 +237,7 @@ def build_dashboard_html(dirpath: Path) -> str:
         "long_months": long_months, "ccl": ccl_vals, "secondary": secondary_vals,
         "yr_labels": yr_labels, "yr_pri_units": yr_pri_units, "yr_sec_units": yr_sec_units,
         "yr_pri_amt": yr_pri_amt, "yr_sec_amt": yr_sec_amt,
+        "projects": projects, "market": market,
         "presale": presale_vals, "primary": primary_vals,
         "q_keys": q_keys, "q_presale": q_presale, "q_primary": q_primary,
         "m_annual": m_annual, "q_annual": q_annual,
@@ -243,6 +273,39 @@ def build_dashboard_html(dirpath: Path) -> str:
   .chart-card h2 {{ font-size: 15px; color: #1f3a5f; margin-bottom: 10px; }}
   .chart {{ width: 100%; height: 400px; }}
   .footer {{ text-align: center; color: #95a5a6; font-size: 11px; padding: 16px; }}
+  .kpi--click {{ cursor: pointer; transition: box-shadow .15s, transform .15s; }}
+  .kpi--click:hover {{ box-shadow: 0 4px 16px rgba(31,111,235,0.22); transform: translateY(-2px); }}
+  .kpi--click .hint {{ color: #1f6feb; font-weight: 600; }}
+
+  .ov {{ position: fixed; inset: 0; background: rgba(15,23,42,.55); display: none;
+        align-items: center; justify-content: center; padding: 24px; z-index: 999; }}
+  .ov.on {{ display: flex; }}
+  .ov__box {{ background: #fff; border-radius: 14px; width: min(1180px, 100%); max-height: 88vh;
+             display: flex; flex-direction: column; overflow: hidden; }}
+  .ov__hd {{ padding: 16px 20px; border-bottom: 1px solid #e8eef5; display: flex;
+            align-items: center; gap: 14px; flex-wrap: wrap; }}
+  .ov__hd h3 {{ font-size: 17px; color: #1f3a5f; margin: 0; }}
+  .ov__sum {{ font-size: 12px; color: #7f8c8d; }}
+  .ov__x {{ margin-left: auto; border: 0; background: #f1f5f9; border-radius: 8px;
+           width: 30px; height: 30px; font-size: 17px; cursor: pointer; color: #64748b; }}
+  .ov__x:hover {{ background: #e2e8f0; }}
+  .ov__find {{ border: 1px solid #dbe4ee; border-radius: 8px; padding: 6px 10px; font-size: 13px; width: 210px; }}
+  .ov__body {{ overflow: auto; }}
+  table.pl {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  table.pl th, table.pl td {{ padding: 8px 12px; border-bottom: 1px solid #eef2f7; white-space: nowrap; }}
+  table.pl th {{ position: sticky; top: 0; background: #f8fafc; color: #475569; font-weight: 600;
+                cursor: pointer; user-select: none; z-index: 1; }}
+  table.pl th:hover {{ background: #eef2f7; }}
+  table.pl td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  table.pl td.nm {{ white-space: normal; min-width: 190px; font-weight: 600; color: #1f3a5f; }}
+  table.pl tbody tr:hover {{ background: #f8fbff; }}
+  .tag {{ display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 20px;
+         background: #eef2ff; color: #4f46e5; margin-left: 6px; font-weight: 600; }}
+  .pctcell {{ display: flex; align-items: center; justify-content: flex-end; gap: 8px; }}
+  .bar {{ position: relative; height: 6px; width: 64px; flex: none;
+         background: #eef2f7; border-radius: 4px; overflow: hidden; }}
+  .bar > i {{ position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: #1f6feb; }}
+  .pctnum {{ min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }}
   @media (max-width: 800px) {{ .kpis {{ grid-template-columns: repeat(2, 1fr); }} }}
 </style>
 </head>
@@ -259,10 +322,10 @@ def build_dashboard_html(dirpath: Path) -> str:
         <div class="value">{data['kpi']['effective_inv']:,}<sub> 伙</sub></div>
         <div class="hint">锚点回推所得，即时可售</div>
       </div>
-      <div class="kpi">
-        <div class="label">预售批出（{data['kpi']['effective_month']}）</div>
-        <div class="value">{data['kpi']['effective_presale']:,}<sub> 伙</sub></div>
-        <div class="hint">地政总署预售楼花批出</div>
+      <div class="kpi kpi--click" id="kpi-market" role="button" tabindex="0">
+        <div class="label">当前市场在售货量</div>
+        <div class="value">{market['remaining']:,}<sub> 伙</sub></div>
+        <div class="hint">{market['projects']} 个在售项目 · 点击查看明细 ▸</div>
       </div>
       <div class="kpi">
         <div class="label">一手成交（{data['kpi']['effective_month']}）</div>
@@ -304,6 +367,31 @@ def build_dashboard_html(dirpath: Path) -> str:
     <div class="chart-card">
       <h2>中原城市领先指数 CCL 与二手成交（上下分区共用横轴 · CCL 自 1994 年、二手成交自 2002 年，默认近 3 年，可拖到最早）</h2>
       <div id="chart-second" class="chart"></div>
+    </div>
+  </div>
+
+  <div class="ov" id="ov">
+    <div class="ov__box">
+      <div class="ov__hd">
+        <h3>当前市场在售项目</h3>
+        <span class="ov__sum" id="ov-sum"></span>
+        <input class="ov__find" id="ov-find" placeholder="搜项目 / 发展商 / 地址">
+        <button class="ov__x" id="ov-x" aria-label="关闭">×</button>
+      </div>
+      <div class="ov__body"><table class="pl">
+        <thead><tr>
+          <th data-k="name">项目</th>
+          <th data-k="total" class="num">总货量</th>
+          <th data-k="sold" class="num">已售</th>
+          <th data-k="left" class="num">余货</th>
+          <th data-k="pct" class="num">余货占比</th>
+          <th data-k="first">开售日期</th>
+          <th data-k="months" class="num">开售月数</th>
+          <th data-k="emd">预计关键日期</th>
+          <th data-k="developer">发展商</th>
+        </tr></thead>
+        <tbody id="ov-rows"></tbody>
+      </table></div>
     </div>
   </div>
 
@@ -550,6 +638,73 @@ def build_dashboard_html(dirpath: Path) -> str:
     annualChart.resize(); invChart.resize(); flowChart.resize();
     qChart.resize(); secondChart.resize(); yearChart.resize();
   }});
+
+  // ---------- 在售项目列表（点 KPI 第二格弹出）----------
+  (function(){{
+    var ov = document.getElementById('ov');
+    if (!ov) return;
+    var rowsEl = document.getElementById('ov-rows');
+    var findEl = document.getElementById('ov-find');
+    var data = (D.projects || []).slice();
+    var sortKey = 'left', sortAsc = false;
+
+    document.getElementById('ov-sum').textContent =
+      D.market.projects + ' 个项目 / ' + D.market.phases + ' 期 · 总货量 ' +
+      D.market.total.toLocaleString() + ' · 已售 ' + D.market.sold.toLocaleString() +
+      ' · 余货 ' + D.market.remaining.toLocaleString() + ' 伙';
+
+    function render(){{
+      var q = (findEl.value || '').trim().toLowerCase();
+      var rows = data.filter(function(p){{
+        if (!q) return true;
+        return (p.name + ' ' + p.developer + ' ' + p.address + ' ' + p.phase_names).toLowerCase().indexOf(q) >= 0;
+      }});
+      rows.sort(function(a, b){{
+        var x = a[sortKey], y = b[sortKey];
+        if (typeof x === 'string' || typeof y === 'string') {{
+          x = String(x); y = String(y);
+          return sortAsc ? x.localeCompare(y) : y.localeCompare(x);
+        }}
+        return sortAsc ? x - y : y - x;
+      }});
+      rowsEl.innerHTML = rows.map(function(p){{
+        // 期数标签的 title 放各期原名，方便定期核对合并对不对
+        var tag = p.phases > 1
+          ? '<span class="tag" title="' + p.phase_names.replace(/"/g, '&quot;') + '">' + p.phases + ' 期</span>'
+          : '';
+        return '<tr>'
+          + '<td class="nm" title="' + p.address.replace(/"/g, '&quot;') + '">' + p.name + tag + '</td>'
+          + '<td class="num">' + p.total.toLocaleString() + '</td>'
+          + '<td class="num">' + p.sold.toLocaleString() + '</td>'
+          + '<td class="num"><b>' + p.left.toLocaleString() + '</b></td>'
+          + '<td class="num"><div class="pctcell"><span class="bar"><i style="width:'
+              + Math.max(2, Math.min(100, p.pct)) + '%"></i></span><span class="pctnum">' + p.pct + '%</span></div></td>'
+          + '<td>' + (p.first || '—') + '</td>'
+          + '<td class="num">' + p.months + '</td>'
+          + '<td>' + (p.emd || '—') + '</td>'
+          + '<td>' + (p.developer || '—') + '</td>'
+          + '</tr>';
+      }}).join('') || '<tr><td colspan="9" style="padding:22px;color:#94a3b8">没有匹配的项目</td></tr>';
+    }}
+
+    [].forEach.call(document.querySelectorAll('table.pl th'), function(th){{
+      th.addEventListener('click', function(){{
+        var k = th.getAttribute('data-k');
+        if (sortKey === k) {{ sortAsc = !sortAsc; }} else {{ sortKey = k; sortAsc = (k === 'name' || k === 'first' || k === 'emd' || k === 'developer'); }}
+        render();
+      }});
+    }});
+    findEl.addEventListener('input', render);
+
+    function open(){{ ov.classList.add('on'); render(); findEl.focus(); }}
+    function close(){{ ov.classList.remove('on'); }}
+    var card = document.getElementById('kpi-market');
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', function(e){{ if (e.key === 'Enter' || e.key === ' ') {{ e.preventDefault(); open(); }} }});
+    document.getElementById('ov-x').addEventListener('click', close);
+    ov.addEventListener('click', function(e){{ if (e.target === ov) close(); }});
+    document.addEventListener('keydown', function(e){{ if (e.key === 'Escape') close(); }});
+  }})();
 
   // 标签页在手机上常常一开就是好几天。切回来且距上次加载超过 10 分钟就自己刷新，
   // 免得看到的是几天前的数字。正在看图时不会打断（只在重新可见时触发）。

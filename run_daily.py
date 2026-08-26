@@ -45,6 +45,37 @@ def _email_when_no_change() -> bool:
     return False
 
 
+HOUSE730_SCRIPT = PROJECT_DIR / "house730_inventory.py"
+HOUSE730_LAST_GOOD = PROJECT_DIR / "data" / "history" / "house730_projects_inventory.csv"
+
+
+def _refresh_house730() -> None:
+    """house730 逐盘在售货量。
+
+    它的接口会限流（开发期间被封过两次），失败时回退到上次成功的结果 ——
+    看板上少一天新鲜度，好过整块「当前市场在售货量」凭空消失。
+    """
+    import subprocess
+
+    out_csv = OUT_DIR / "projects_inventory.csv"
+    try:
+        subprocess.run(
+            [sys.executable, str(HOUSE730_SCRIPT), "--out", str(out_csv)],
+            check=True, cwd=str(PROJECT_DIR),
+        )
+        HOUSE730_LAST_GOOD.parent.mkdir(parents=True, exist_ok=True)
+        HOUSE730_LAST_GOOD.write_bytes(out_csv.read_bytes())
+        print("[run_daily] house730 项目表已更新")
+    except Exception as e:
+        print(f"[run_daily] house730 抓取失败: {e}")
+        if HOUSE730_LAST_GOOD.exists():
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            out_csv.write_bytes(HOUSE730_LAST_GOOD.read_bytes())
+            print(f"[run_daily] 已回退到上次成功的结果（{HOUSE730_LAST_GOOD.name}）")
+        else:
+            print("[run_daily] 无可回退结果，看板将不显示在售项目列表")
+
+
 def _regenerate_chart_from_output() -> None:
     """生成交互式 HTML 看板（ECharts），供 GitHub Pages 网页版查看。（已停用研报 PDF/PNG）"""
     sys.path.insert(0, str(PROJECT_DIR))
@@ -78,6 +109,7 @@ def main() -> int:
     finally:
         sys.argv = old_argv
 
+    _refresh_house730()
     _regenerate_chart_from_output()
 
 
