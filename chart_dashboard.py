@@ -252,6 +252,17 @@ def build_dashboard_html(dirpath: Path) -> str:
             "as_of": str(pp["as_of"].iloc[0]) if "as_of" in pp.columns else "",
         }
 
+    # 折线（官方含资助口径）与 KPI（已剔除资助）会差一截，图下加注说明
+    pending_line_note = "—"
+    if pending_vals:
+        last_line = next((v for v in reversed(pending_vals) if v is not None), None)
+        if last_line is not None:
+            kpi_units = pending_market["units"]
+            pending_line_note = (
+                f"{int(last_line):,} 伙；KPI 剔除后为 {kpi_units:,} 伙"
+                if kpi_units and int(last_line) != kpi_units else f"{int(last_line):,} 伙"
+            )
+
     from datetime import datetime
     last_update = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -298,6 +309,7 @@ def build_dashboard_html(dirpath: Path) -> str:
   .chart-card h2 {{ font-size: 15px; color: #1f3a5f; margin-bottom: 10px; }}
   .chart {{ width: 100%; height: 400px; }}
   .footer {{ text-align: center; color: #95a5a6; font-size: 11px; padding: 16px; }}
+  .chart-note {{ font-size: 12px; color: #94a3b8; margin: -6px 0 8px; line-height: 1.5; }}
   .kpi--click {{ cursor: pointer; transition: box-shadow .15s, transform .15s; }}
   .kpi--click:hover {{ box-shadow: 0 4px 16px rgba(31,111,235,0.22); transform: translateY(-2px); }}
   .kpi--click .hint {{ color: #1f6feb; font-weight: 600; }}
@@ -371,6 +383,12 @@ def build_dashboard_html(dirpath: Path) -> str:
 
     <div class="chart-card">
       <h2>即时可售货量 vs 待批预售楼花（月度走势 · 默认显示近 3 年，可拖动查看更早）</h2>
+      <div class="chart-note">
+        注：待批预售楼花这条线取自地政总署月报的官方合计，<b>含资助出售房屋</b>，
+        最新一期 {pending_line_note}。
+        顶部「最新待批预售」KPI 已剔除资助房屋，因此两个数字不同 ——
+        月报只给合计、无法拆分历史，所以折线保留官方口径。
+      </div>
       <div id="chart-inv" class="chart"></div>
     </div>
 
