@@ -582,6 +582,129 @@ def fetch_pending_month(s: requests.Session, ym: str) -> tuple[int, int] | None:
     return int(m.group(1).replace(",", "")), int(m.group(2).replace(",", ""))
 
 
+# 待批预售的逐条明细：CSDI 的 LAO_PCRDP 就是地政署月报那张明细表的结构化版本，
+# 32 条记录、13,734 伙与月报 Summary 逐条对得上，不必去解析 PDF。
+PENDING_DETAIL_CSV_URL = (
+    "https://static.csdi.gov.hk/csdi-webpage/download/"
+    "c84ee393122e5442985d6ce1cdddd162/csv"
+)
+_PENDING_FIELD_MAP = {
+    "lot": "NAME_EN",            # 地段编号，多期项目的合并键
+    "address": "ADDRESS_EN",
+    "name": "NSEARCH01_EN",      # 发展项目名称，多为 Pending
+    "vendor": "NSEARCH02_EN",
+    "emd": "NSEARCH10_EN",       # 预计落成日期，形如 "31 December 2028"
+    "units": "NSEARCH11_EN",
+    "category": "NSEARCH12_EN",  # "Subsidised Sale Flats" 或空
+    "as_of": "NSEARCH13_EN",     # 数据截至日期
+}
+
+
+def fetch_pending_projects(s: requests.Session) -> list[dict]:
+    """待批预售的逐条申请（住宅）。返回统一命名的字段。"""
+    r = _http_get(s, PENDING_DETAIL_CSV_URL, timeout=120)
+    r.raise_for_status()
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+        if not names:
+            raise RuntimeError(f"待批明细压缩包里没有 CSV: {zf.namelist()}")
+        with zf.open(names[0]) as fh:
+            df = pd.read_csv(fh)
+
+    out = []
+    for rec in df.to_dict("records"):
+        row = {k: ("" if pd.isna(rec.get(col)) else str(rec.get(col)).strip())
+               for k, col in _PENDING_FIELD_MAP.items()}
+        if not row["units"].replace(",", "").isdigit():
+            continue
+        out.append(row)
+    return out
+
+
+def _norm_lot(v: str) -> str:
+    """地段编号归一。RP（余段）、& Exts 之类的后缀去掉，编号本身保留。"""
+    v = re.sub(r"\s+", " ", (v or "").upper()).strip()
+    v = re.sub(r"\bRP\b|&\s*EXTS?\b|\bSEC(?:TION)?\.?\s*[A-Z]\b", " ", v)
+    return re.sub(r"\s+", " ", v).strip()
+
+
+def _pending_display_name(phases: list[dict]) -> str:
+    """项目名三级降级：真实项目名 -> 地址 -> 地段编号。
+
+    32 条申请里 25 条项目名是 "Pending"（尚未定名），6 条连地址也是 Pending，
+    所以必须能一路退到地段编号。
+    """
+    def usable(v: str) -> bool:
+        return bool(v) and not v.strip().lower().startswith("pending")
+
+    named = [p["name"] for p in phases if usable(p.get("name", ""))]
+    if named:
+        # 去掉 "(Phase X)" / "Phase X of"。注意括号会嵌套：
+        # "SAI SHA RESIDENCES (Phase 2C(2))"，所以从 phase 起一路吃到末尾，
+        # 再把残留的孤立标点清掉。
+        base = []
+        for n in named:
+            b = re.sub(r"\s*\(?\bphase\b.*$", "", n, flags=re.I)
+            b = re.sub(r"^\s*of\s+", "", b, flags=re.I)
+            b = re.sub(r"\s+of\s*$", "", b, flags=re.I)
+            b = re.sub(r"[\s,\(\)]+$", "", re.sub(r"\s+", " ", b)).strip()
+            if b:
+                base.append(b)
+        if base:
+            return max(set(base), key=base.count)
+    addr = [p["address"] for p in phases if usable(p.get("address", ""))]
+    if addr:
+        return min(addr, key=len)
+    return _norm_lot(phases[0].get("lot", "")) or "（未定名）"
+
+
+def build_pending_projects(records: list[dict]) -> pd.DataFrame:
+    """把逐条申请按「地段编号 + 卖方」并成项目。
+
+    地段编号是地政署自己的地块标识，是这份数据最可靠的合并键 —— 项目名和地址
+    大多还是 Pending，根本对不上（NKIL 6458 的三期名字全叫 "Pending (Phase N)"）。
+    实测 7 个多期组的卖方完全一致，所以加上卖方只会更稳，不会拆散任何一组。
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in records:
+        units = r.get("units", "").replace(",", "")
+        if not units.isdigit():
+            continue
+        r = {**r, "_units": int(units)}
+        key = (_norm_lot(r.get("lot", "")),
+               re.sub(r"[^a-z0-9]+", "", (r.get("vendor") or "").lower()))
+        groups.setdefault(key, []).append(r)
+
+    def iso(d: str) -> str:
+        try:
+            return datetime.strptime((d or "").strip(), "%d %B %Y").date().isoformat()
+        except ValueError:
+            return ""
+
+    rows = []
+    for (lot, _dev), phases in groups.items():
+        # 转成 ISO 再排，dd/mm/yyyy 直接按字符串排会把 30/06/2027 排在 30/11/2026 前面
+        emds = sorted({iso(p["emd"]) for p in phases if iso(p.get("emd", ""))})
+        subsidised = any("subsid" in (p.get("category") or "").lower() for p in phases)
+        rows.append({
+            "project": _pending_display_name(phases),
+            "phases": len(phases),
+            "phase_names": " | ".join(p.get("name", "") or "—" for p in phases),
+            "lot": lot,
+            "subsidised": subsidised,
+            "address": next((p["address"] for p in phases
+                             if p.get("address") and not p["address"].lower().startswith("pending")), ""),
+            "vendor": phases[0].get("vendor", ""),
+            "pending_units": sum(p["_units"] for p in phases),
+            "estimated_material_date": (
+                emds[0] if len(emds) == 1 else (f"{emds[0]} ~ {emds[-1]}" if emds else "")
+            ),
+            "as_of": iso(phases[0].get("as_of", "")) or phases[0].get("as_of", ""),
+        })
+    df = pd.DataFrame(rows).sort_values("pending_units", ascending=False).reset_index(drop=True)
+    return df
+
+
 def _read_pending_history(history_csv: Path) -> pd.DataFrame:
     cols = ["month", "pending_units", "pending_applications"]
     if not history_csv.exists():
@@ -794,6 +917,19 @@ def main() -> None:
             start, end, PENDING_HISTORY_CSV, backfill=args.pending_backfill
         )
         pending.to_csv(out_dir / "pending_presale_monthly.csv", index=False, encoding="utf-8-sig")
+        # 逐项目明细（CSDI 当前快照），给看板第三个 KPI 和它点开的列表用
+        recs = fetch_pending_projects(_requests_session())
+        if recs:
+            proj = build_pending_projects(recs)
+            proj.to_csv(out_dir / "pending_projects.csv", index=False, encoding="utf-8-sig")
+            got = int(proj["pending_units"].sum())
+            latest = pending.dropna(subset=["pending_units"])["month"].max()
+            want = int(pending.loc[pending["month"] == latest, "pending_units"].iloc[0]) \
+                if isinstance(latest, str) else None
+            flag = "对上" if got == want else f"与月报 {latest} 的 {want:,} 不同（快照日更新）"
+            sub_n = int(proj["subsidised"].sum())
+            print(f"  待批明细: {len(recs)} 条申请 -> {len(proj)} 个项目, {got:,} 伙"
+                  f"（其中资助出售房屋 {sub_n} 个项目），与月报 Summary {flag}")
     except Exception as e:
         print(f"  [待批] 获取失败，本次跳过: {e}")
     try:

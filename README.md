@@ -193,7 +193,7 @@ https://portal.csdi.gov.hk/server/rest/services/common/landsd_rcd_1637303511514_
 > 另有 `_assert_landreg_coverage()`：区间内缺月就直接报错触发回退，
 > **绝不静默补 0** —— 补 0 会直接污染回推出来的库存曲线。
 
-### 3. 待批预售楼花 —— 地政总署月报 PDF
+### 3. 待批预售楼花 —— 月度合计走月报 PDF，逐项目明细走 CSDI
 
 索引页列出每个月的归档（回溯到 2013-01）：
 
@@ -207,7 +207,7 @@ https://www.landsd.gov.hk/en/resources/land-info-stat/dev-control-compliance/con
 https://www.landsd.gov.hk/doc/en/consent/monthly/t2_YYMM.pdf     # 例: t2_2607.pdf = 2026-07
 ```
 
-**只读末页的 Summary，不解析表格。** 明细表跨十几页、单元格还会换行，解析极易出错；
+**月度合计只读末页的 Summary，不解析明细表。** 明细表跨十几页、单元格还会换行，解析极易出错；
 而末页有现成的合计：
 
 ```
@@ -226,6 +226,32 @@ Total no. of residential units involved : 13,734
 ```bash
 python 一手短期库存.py --pending-backfill
 ```
+
+#### 逐项目明细 —— 用 CSDI，别去解析 PDF
+
+看板 KPI 第三格「最新待批预售」和点开的列表要的是**逐条申请**。月报明细表跨十几页、
+单元格换行、每页重复表头，解析很脆；而 CSDI 的 `LAO_PCRDP` 数据集就是**同一张表的
+结构化版本**：
+
+```
+https://static.csdi.gov.hk/csdi-webpage/download/c84ee393122e5442985d6ce1cdddd162/csv
+```
+
+32 条记录、13,734 伙，与月报末页 Summary 逐条 `(地段编号, 单位数)` 完全一致。
+字段映射见 `_PENDING_FIELD_MAP`；比 PDF 还多一个 `NSEARCH12_EN`
+（`Subsidised Sale Flats`），能直接标出资助出售房屋（当前 3 条，全部房協，3,768 伙）。
+
+> 这份只有**当前快照**没有历史 —— 所以月度那条线仍然只能靠 PDF。两者分工：
+> **PDF 给历史合计，CSDI 给当前明细。**
+
+**期数合并用地段编号，不是名称也不是地址。** 32 条里 **25 条项目名是 `Pending`**
+（尚未定名）、6 条连地址都是 `Pending`，`NKIL 6458` 的三期全叫 "Pending (Phase N)" ——
+只有地政署自己的地段编号能可靠对上。归一时去掉 `RP`（余段）、`& Exts`、`Section A`
+等后缀但保留编号本身（所以 `KIL 11275` 与 `KIL 11276` 不会误并），
+再以卖方作第二重判据（实测 7 个多期组卖方全部一致，加上只会更稳）。
+**32 宗申请 → 21 个项目。**
+
+项目名三级降级：**真实项目名 → 地址 → 地段编号**，因为大多数还没定名。
 
 > **为什么不用 CSDI 的 `LAO_PCRDP` 下载包**（`static.csdi.gov.hk/csdi-webpage/download/.../csv`）：
 > 那份**只有当前快照，没有任何历史**。ArcGIS 图层自报 `supportsQueryWithHistoricMoment: false`、

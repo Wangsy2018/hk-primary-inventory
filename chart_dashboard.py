@@ -94,6 +94,7 @@ def build_dashboard_html(dirpath: Path) -> str:
     ccl_df = _load_optional_csv(dirpath, "ccl_monthly.csv")
     landreg_full = _load_optional_csv(dirpath, "landreg_full_monthly.csv")
     projects_df = _load_optional_csv(dirpath, "projects_inventory.csv")
+    pending_proj_df = _load_optional_csv(dirpath, "pending_projects.csv")
     echarts_src = resolve_echarts_src(dirpath)
 
     # 合并月度批出 / 成交，统一用 YYYY-MM 字符串作 key
@@ -228,6 +229,30 @@ def build_dashboard_html(dirpath: Path) -> str:
             "remaining": int(pf["remaining_units"].sum()),
         }
 
+    # 待批预售逐项目（CSDI 当前快照）：KPI 第三格 + 点开的列表
+    pending_projects: list[dict] = []
+    pending_market = {"projects": 0, "applications": 0, "units": 0, "as_of": ""}
+    if pending_proj_df is not None and not pending_proj_df.empty:
+        pp = pending_proj_df.fillna("")
+        for r in pp.to_dict("records"):
+            pending_projects.append({
+                "name": str(r.get("project", "")),
+                "phases": int(r.get("phases") or 0),
+                "phase_names": str(r.get("phase_names", "")),
+                "lot": str(r.get("lot", "")),
+                "address": str(r.get("address", "")),
+                "vendor": str(r.get("vendor", "")),
+                "units": int(r.get("pending_units") or 0),
+                "emd": str(r.get("estimated_material_date", "")),
+                "sub": bool(r.get("subsidised")),
+            })
+        pending_market = {
+            "projects": len(pending_projects),
+            "applications": int(pp["phases"].sum()),
+            "units": int(pp["pending_units"].sum()),
+            "as_of": str(pp["as_of"].iloc[0]) if "as_of" in pp.columns else "",
+        }
+
     from datetime import datetime
     last_update = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -238,6 +263,7 @@ def build_dashboard_html(dirpath: Path) -> str:
         "yr_labels": yr_labels, "yr_pri_units": yr_pri_units, "yr_sec_units": yr_sec_units,
         "yr_pri_amt": yr_pri_amt, "yr_sec_amt": yr_sec_amt,
         "projects": projects, "market": market,
+        "pending_projects": pending_projects, "pending_market": pending_market,
         "presale": presale_vals, "primary": primary_vals,
         "q_keys": q_keys, "q_presale": q_presale, "q_primary": q_primary,
         "m_annual": m_annual, "q_annual": q_annual,
@@ -299,6 +325,7 @@ def build_dashboard_html(dirpath: Path) -> str:
   table.pl td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   table.pl td.nm {{ white-space: normal; min-width: 190px; font-weight: 600; color: #1f3a5f; }}
   table.pl tbody tr:hover {{ background: #f8fbff; }}
+  .tag--sub {{ background: #fef3c7; color: #b45309; }}
   .tag {{ display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 20px;
          background: #eef2ff; color: #4f46e5; margin-left: 6px; font-weight: 600; }}
   .pctcell {{ display: flex; align-items: center; justify-content: flex-end; gap: 8px; }}
@@ -327,10 +354,10 @@ def build_dashboard_html(dirpath: Path) -> str:
         <div class="value">{market['remaining']:,}<sub> 伙</sub></div>
         <div class="hint">{market['projects']} 个在售项目 · 点击查看明细 ▸</div>
       </div>
-      <div class="kpi">
-        <div class="label">一手成交（{data['kpi']['effective_month']}）</div>
-        <div class="value">{data['kpi']['effective_primary']:,}<sub> 伙</sub></div>
-        <div class="hint">土地注册处一手成交</div>
+      <div class="kpi kpi--click" id="kpi-pending" role="button" tabindex="0">
+        <div class="label">最新待批预售（截至 {pending_market['as_of'] or '—'}）</div>
+        <div class="value">{pending_market['units']:,}<sub> 伙</sub></div>
+        <div class="hint">{pending_market['projects']} 个项目 / {pending_market['applications']} 宗申请 · 点击查看明细 ▸</div>
       </div>
       <div class="kpi">
         <div class="label">当月净变化（批出-成交）</div>
@@ -391,6 +418,28 @@ def build_dashboard_html(dirpath: Path) -> str:
           <th data-k="developer">发展商</th>
         </tr></thead>
         <tbody id="ov-rows"></tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <div class="ov" id="ov2">
+    <div class="ov__box">
+      <div class="ov__hd">
+        <h3>最新待批预售同意书</h3>
+        <span class="ov__sum" id="ov2-sum"></span>
+        <input class="ov__find" id="ov2-find" placeholder="搜项目 / 卖方 / 地段 / 地址">
+        <button class="ov__x" id="ov2-x" aria-label="关闭">×</button>
+      </div>
+      <div class="ov__body"><table class="pl">
+        <thead><tr>
+          <th data-k="name">项目</th>
+          <th data-k="units" class="num">待批伙数</th>
+          <th data-k="emd">预计关键日期</th>
+          <th data-k="lot">地段编号</th>
+          <th data-k="vendor">卖方</th>
+          <th data-k="address">地址</th>
+        </tr></thead>
+        <tbody id="ov2-rows"></tbody>
       </table></div>
     </div>
   </div>
@@ -639,27 +688,27 @@ def build_dashboard_html(dirpath: Path) -> str:
     qChart.resize(); secondChart.resize(); yearChart.resize();
   }});
 
-  // ---------- 在售项目列表（点 KPI 第二格弹出）----------
-  (function(){{
-    var ov = document.getElementById('ov');
-    if (!ov) return;
-    var rowsEl = document.getElementById('ov-rows');
-    var findEl = document.getElementById('ov-find');
-    var data = (D.projects || []).slice();
-    var sortKey = 'left', sortAsc = false;
+  // ---------- 可点 KPI 弹出的明细列表（两处共用）----------
+  function esc(v) {{ return String(v == null ? '' : v).replace(/"/g, '&quot;'); }}
+  function num(v) {{ return Number(v || 0).toLocaleString(); }}
 
-    document.getElementById('ov-sum').textContent =
-      D.market.projects + ' 个项目 / ' + D.market.phases + ' 期 · 总货量 ' +
-      D.market.total.toLocaleString() + ' · 已售 ' + D.market.sold.toLocaleString() +
-      ' · 余货 ' + D.market.remaining.toLocaleString() + ' 伙';
+  function mountOverlay(cfg) {{
+    var ov = document.getElementById(cfg.ov);
+    var card = document.getElementById(cfg.kpi);
+    if (!ov || !card) return;
+    var rowsEl = document.getElementById(cfg.ov + '-rows');
+    var findEl = document.getElementById(cfg.ov + '-find');
+    var data = (cfg.data || []).slice();
+    var sortKey = cfg.sortKey, sortAsc = false;
 
-    function render(){{
+    document.getElementById(cfg.ov + '-sum').textContent = cfg.summary;
+
+    function render() {{
       var q = (findEl.value || '').trim().toLowerCase();
-      var rows = data.filter(function(p){{
-        if (!q) return true;
-        return (p.name + ' ' + p.developer + ' ' + p.address + ' ' + p.phase_names).toLowerCase().indexOf(q) >= 0;
+      var rows = data.filter(function (p) {{
+        return !q || cfg.searchText(p).toLowerCase().indexOf(q) >= 0;
       }});
-      rows.sort(function(a, b){{
+      rows.sort(function (a, b) {{
         var x = a[sortKey], y = b[sortKey];
         if (typeof x === 'string' || typeof y === 'string') {{
           x = String(x); y = String(y);
@@ -667,44 +716,82 @@ def build_dashboard_html(dirpath: Path) -> str:
         }}
         return sortAsc ? x - y : y - x;
       }});
-      rowsEl.innerHTML = rows.map(function(p){{
-        // 期数标签的 title 放各期原名，方便定期核对合并对不对
-        var tag = p.phases > 1
-          ? '<span class="tag" title="' + p.phase_names.replace(/"/g, '&quot;') + '">' + p.phases + ' 期</span>'
-          : '';
-        return '<tr>'
-          + '<td class="nm" title="' + p.address.replace(/"/g, '&quot;') + '">' + p.name + tag + '</td>'
-          + '<td class="num">' + p.total.toLocaleString() + '</td>'
-          + '<td class="num">' + p.sold.toLocaleString() + '</td>'
-          + '<td class="num"><b>' + p.left.toLocaleString() + '</b></td>'
-          + '<td class="num"><div class="pctcell"><span class="bar"><i style="width:'
-              + Math.max(2, Math.min(100, p.pct)) + '%"></i></span><span class="pctnum">' + p.pct + '%</span></div></td>'
-          + '<td>' + (p.first || '—') + '</td>'
-          + '<td class="num">' + p.months + '</td>'
-          + '<td>' + (p.emd || '—') + '</td>'
-          + '<td>' + (p.developer || '—') + '</td>'
-          + '</tr>';
-      }}).join('') || '<tr><td colspan="9" style="padding:22px;color:#94a3b8">没有匹配的项目</td></tr>';
+      rowsEl.innerHTML = rows.map(cfg.row).join('')
+        || '<tr><td colspan="9" style="padding:22px;color:#94a3b8">没有匹配的项目</td></tr>';
     }}
 
-    [].forEach.call(document.querySelectorAll('table.pl th'), function(th){{
-      th.addEventListener('click', function(){{
+    [].forEach.call(ov.querySelectorAll('table.pl th'), function (th) {{
+      th.addEventListener('click', function () {{
         var k = th.getAttribute('data-k');
-        if (sortKey === k) {{ sortAsc = !sortAsc; }} else {{ sortKey = k; sortAsc = (k === 'name' || k === 'first' || k === 'emd' || k === 'developer'); }}
+        if (sortKey === k) {{ sortAsc = !sortAsc; }}
+        else {{ sortKey = k; sortAsc = (cfg.textCols.indexOf(k) >= 0); }}
         render();
       }});
     }});
     findEl.addEventListener('input', render);
 
-    function open(){{ ov.classList.add('on'); render(); findEl.focus(); }}
-    function close(){{ ov.classList.remove('on'); }}
-    var card = document.getElementById('kpi-market');
+    function open() {{ ov.classList.add('on'); render(); findEl.focus(); }}
+    function close() {{ ov.classList.remove('on'); }}
     card.addEventListener('click', open);
-    card.addEventListener('keydown', function(e){{ if (e.key === 'Enter' || e.key === ' ') {{ e.preventDefault(); open(); }} }});
-    document.getElementById('ov-x').addEventListener('click', close);
-    ov.addEventListener('click', function(e){{ if (e.target === ov) close(); }});
-    document.addEventListener('keydown', function(e){{ if (e.key === 'Escape') close(); }});
-  }})();
+    card.addEventListener('keydown', function (e) {{
+      if (e.key === 'Enter' || e.key === ' ') {{ e.preventDefault(); open(); }}
+    }});
+    document.getElementById(cfg.ov + '-x').addEventListener('click', close);
+    ov.addEventListener('click', function (e) {{ if (e.target === ov) close(); }});
+    document.addEventListener('keydown', function (e) {{ if (e.key === 'Escape') close(); }});
+  }}
+
+  // 在售项目（house730）
+  mountOverlay({{
+    ov: 'ov', kpi: 'kpi-market', data: D.projects, sortKey: 'left',
+    textCols: ['name', 'first', 'emd', 'developer'],
+    summary: D.market.projects + ' 个项目 / ' + D.market.phases + ' 期 · 总货量 '
+      + num(D.market.total) + ' · 已售 ' + num(D.market.sold)
+      + ' · 余货 ' + num(D.market.remaining) + ' 伙',
+    searchText: function (p) {{ return p.name + ' ' + p.developer + ' ' + p.address + ' ' + p.phase_names; }},
+    row: function (p) {{
+      // 期数标签的 title 放各期原名，便于定期核对合并对不对
+      var tag = p.phases > 1
+        ? '<span class="tag" title="' + esc(p.phase_names) + '">' + p.phases + ' 期</span>' : '';
+      return '<tr>'
+        + '<td class="nm" title="' + esc(p.address) + '">' + p.name + tag + '</td>'
+        + '<td class="num">' + num(p.total) + '</td>'
+        + '<td class="num">' + num(p.sold) + '</td>'
+        + '<td class="num"><b>' + num(p.left) + '</b></td>'
+        + '<td class="num"><div class="pctcell"><span class="bar"><i style="width:'
+            + Math.max(2, Math.min(100, p.pct)) + '%"></i></span>'
+            + '<span class="pctnum">' + p.pct + '%</span></div></td>'
+        + '<td>' + (p.first || '—') + '</td>'
+        + '<td class="num">' + p.months + '</td>'
+        + '<td>' + (p.emd || '—') + '</td>'
+        + '<td>' + (p.developer || '—') + '</td>'
+        + '</tr>';
+    }}
+  }});
+
+  // 待批预售同意书（地政总署 / CSDI）
+  mountOverlay({{
+    ov: 'ov2', kpi: 'kpi-pending', data: D.pending_projects, sortKey: 'units',
+    textCols: ['name', 'emd', 'lot', 'vendor', 'address'],
+    summary: D.pending_market.projects + ' 个项目 / ' + D.pending_market.applications
+      + ' 宗申请 · 合计 ' + num(D.pending_market.units) + ' 伙 · 截至 ' + D.pending_market.as_of,
+    searchText: function (p) {{ return p.name + ' ' + p.vendor + ' ' + p.lot + ' ' + p.address + ' ' + p.phase_names; }},
+    row: function (p) {{
+      var tag = p.phases > 1
+        ? '<span class="tag" title="' + esc(p.phase_names) + '">' + p.phases + ' 期</span>' : '';
+      // 资助出售房屋不属于私人市场货量，标出来
+      var sub = p.sub ? '<span class="tag tag--sub">资助</span>' : '';
+      return '<tr>'
+        + '<td class="nm" title="' + esc(p.phase_names) + '">' + p.name + tag + sub + '</td>'
+        + '<td class="num"><b>' + num(p.units) + '</b></td>'
+        + '<td>' + (p.emd || '—') + '</td>'
+        + '<td>' + (p.lot || '—') + '</td>'
+        + '<td>' + (p.vendor || '—') + '</td>'
+        + '<td class="nm" style="font-weight:400">'
+            + ((p.address && p.address !== p.name) ? p.address : '—') + '</td>'
+        + '</tr>';
+    }}
+  }});
 
   // 标签页在手机上常常一开就是好几天。切回来且距上次加载超过 10 分钟就自己刷新，
   // 免得看到的是几天前的数字。正在看图时不会打断（只在重新可见时触发）。
