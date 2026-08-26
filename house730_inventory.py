@@ -35,6 +35,12 @@ DEFAULT_OUT = PROJECT_DIR / "out_inventory" / "projects_inventory.csv"
 # 每天只补：本地没有的期数 + 还没开售的期数（它们随时可能开）。
 SALE_PROCESS_CSV = PROJECT_DIR / "data" / "history" / "house730_sale_process.csv"
 
+# 只统计私人住宅市场：资助出售房屋不算市场货量。
+# 按 main developer 的原始字串做不区分大小写的子串匹配，要加就往这里加。
+EXCLUDED_DEVELOPERS = (
+    "hong kong housing society",   # 房協
+)
+
 _PHASE_TAIL = re.compile(
     r"\s*[,，]?\s*(?:phase|期數|期数)\s*[IVXLC0-9]+[A-Z]?\b.*$|\s*第\s*[一二三四五六七八九十0-9]+\s*期.*$",
     re.I,
@@ -214,6 +220,11 @@ def save_sale_process_cache(path: Path, cache: dict) -> None:
             for k, v in sorted(cache.items(), key=lambda x: str(x[0]))]
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def is_excluded(developer: str | None) -> bool:
+    d = (developer or "").lower()
+    return any(k in d for k in EXCLUDED_DEVELOPERS)
 
 
 def norm_address(a: str | None) -> str:
@@ -428,6 +439,12 @@ def main() -> None:
     for e in estates:
         e["estateId"] = str(e["estateId"])
         e["_addr_zh"] = zh.get(e["estateId"]) or zh.get(int(e["estateId"]))
+    dropped = [e for e in estates if is_excluded(e.get("mainDeveloperWithCulture"))]
+    if dropped:
+        estates = [e for e in estates if not is_excluded(e.get("mainDeveloperWithCulture"))]
+        names = ", ".join(sorted({(e.get("estateNameEn") or e.get("estateNameWithCulture") or "?")
+                                  for e in dropped})[:4])
+        print(f"      剔除资助出售房屋 {len(dropped)} 期（{names}）")
     if args.limit:
         estates = estates[: args.limit]
     print(f"      {len(estates)} 个期数")

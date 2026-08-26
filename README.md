@@ -284,6 +284,10 @@ GET 即可，返回 `rawData`，其中 `ccl` 是周度指数值，`realContractE
 
 **只放已开售项目**：项目里任何一期有 First Sales Date 即算已开售；市场余货加总也只算这些项目。
 
+**只统计私人住宅市场**：资助出售房屋不算市场货量，按 main developer 剔除，
+名单在 `EXCLUDED_DEVELOPERS`（目前只有房協 `HONG KONG HOUSING SOCIETY`，
+剔除 4 期 / 1 个已开售项目 SIERRA TERRACE，余货 18,640 → 18,099）。要加就往那个元组里加。
+
 **日期落盘缓存**：已开售期数的首次出售日期不会再变，抓过就存进
 `data/history/house730_sale_process.csv`；每天只补新增期数和**还没开售的期数**
 （它们随时可能开售）。当前 769 期里 243 期已有日期、526 期待开售，
