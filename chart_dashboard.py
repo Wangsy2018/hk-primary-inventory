@@ -252,17 +252,6 @@ def build_dashboard_html(dirpath: Path) -> str:
             "as_of": str(pp["as_of"].iloc[0]) if "as_of" in pp.columns else "",
         }
 
-    # 折线（官方含资助口径）与 KPI（已剔除资助）会差一截，图下加注说明
-    pending_line_note = "—"
-    if pending_vals:
-        last_line = next((v for v in reversed(pending_vals) if v is not None), None)
-        if last_line is not None:
-            kpi_units = pending_market["units"]
-            pending_line_note = (
-                f"{int(last_line):,} 伙；KPI 剔除后为 {kpi_units:,} 伙"
-                if kpi_units and int(last_line) != kpi_units else f"{int(last_line):,} 伙"
-            )
-
     # GitHub runner 的系统时区是 UTC，直接 now() 会打出 UTC 时间，
     # 对着一个香港市场的看板看很容易误读，所以固定换算成港时
     from datetime import datetime, timedelta, timezone
@@ -294,7 +283,7 @@ def build_dashboard_html(dirpath: Path) -> str:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>香港一手住宅市场 - 即时可售货量看板</title>
+<title>香港一手住宅行情看板</title>
 <script src="{echarts_src}"></script>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -352,7 +341,7 @@ def build_dashboard_html(dirpath: Path) -> str:
 </head>
 <body>
   <div class="header">
-    <h1>🏙️ 香港一手住宅市场 · 即时可售货量看板</h1>
+    <h1>🏙️ 香港一手住宅行情看板</h1>
     <div class="sub">数据来源：土地注册处一手成交 · 地政总署预售批出 · 锚点回推 · 数据截至 {data['kpi']['effective_month']} · 更新时间 {data['kpi']['last_update']}</div>
   </div>
 
@@ -388,10 +377,9 @@ def build_dashboard_html(dirpath: Path) -> str:
     <div class="chart-card">
       <h2>即时可售货量 vs 待批预售楼花（月度走势 · 默认显示近 3 年，可拖动查看更早）</h2>
       <div class="chart-note">
-        注：待批预售楼花这条线取自地政总署月报的官方合计，<b>含资助出售房屋</b>，
-        最新一期 {pending_line_note}。
-        顶部「最新待批预售」KPI 已剔除资助房屋，因此两个数字不同 ——
-        月报只给合计、无法拆分历史，所以折线保留官方口径。
+        注：待批预售楼花这条线取自地政总署月报的官方合计，<b>含资助出售房屋</b>；
+        顶部「最新待批预售」KPI 走 CSDI 逐项目明细，<b>已剔除资助房屋</b>，
+        所以两者会有差额。月报只公布合计、无法拆分历史，故折线保留官方口径。
       </div>
       <div id="chart-inv" class="chart"></div>
     </div>
