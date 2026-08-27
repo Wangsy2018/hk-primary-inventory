@@ -95,6 +95,7 @@ def build_dashboard_html(dirpath: Path) -> str:
     landreg_full = _load_optional_csv(dirpath, "landreg_full_monthly.csv")
     projects_df = _load_optional_csv(dirpath, "projects_inventory.csv")
     pending_proj_df = _load_optional_csv(dirpath, "pending_projects.csv")
+    mtd_df = _load_optional_csv(dirpath, "month_to_date_registrations.csv")
     echarts_src = resolve_echarts_src(dirpath)
 
     # 合并月度批出 / 成交，统一用 YYYY-MM 字符串作 key
@@ -252,6 +253,17 @@ def build_dashboard_html(dirpath: Path) -> str:
             "as_of": str(pp["as_of"].iloc[0]) if "as_of" in pp.columns else "",
         }
 
+    # 本月至今的成交注册（中原，临时数字）
+    mtd = {"as_of": "", "month_label": "", "primary": None, "secondary": None}
+    if mtd_df is not None and not mtd_df.empty:
+        r = mtd_df.fillna("").iloc[0]
+        mtd = {
+            "as_of": str(r.get("as_of", "")),
+            "month_label": str(r.get("month_label", "")),
+            "primary": int(r.get("primary_deals") or 0),
+            "secondary": int(r.get("secondary_deals") or 0),
+        }
+
     # GitHub runner 的系统时区是 UTC，直接 now() 会打出 UTC 时间，
     # 对着一个香港市场的看板看很容易误读，所以固定换算成港时
     from datetime import datetime, timedelta, timezone
@@ -276,6 +288,10 @@ def build_dashboard_html(dirpath: Path) -> str:
             "last_update": last_update,
         },
     }
+    mtd_as_of_txt = f"（截至 {mtd['as_of']}）" if mtd["as_of"] else ""
+    mtd_primary_txt = f"{mtd['primary']:,}" if mtd["primary"] is not None else "—"
+    mtd_secondary_txt = f"{mtd['secondary']:,}" if mtd["secondary"] is not None else "—"
+
     data_json = json.dumps(data, ensure_ascii=False)
 
     html = f"""<!DOCTYPE html>
@@ -297,6 +313,8 @@ def build_dashboard_html(dirpath: Path) -> str:
   .kpi .label {{ font-size: 13px; color: #7f8c8d; }}
   .kpi .value {{ font-size: 26px; font-weight: 700; color: #1f3a5f; margin-top: 6px; }}
   .kpi .value sub {{ font-size: 13px; color: #7f8c8d; font-weight: 400; }}
+  .kpi .value2 {{ font-size: 19px; font-weight: 700; color: #7f7fd5; margin-top: 2px; }}
+  .kpi .value2 sub {{ font-size: 12px; color: #7f8c8d; font-weight: 400; }}
   .kpi .hint {{ font-size: 11px; color: #95a5a6; margin-top: 4px; }}
   .chart-card {{ background: #fff; border-radius: 12px; padding: 16px 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 20px; }}
   .chart-card h2 {{ font-size: 15px; color: #1f3a5f; margin-bottom: 10px; }}
@@ -342,7 +360,7 @@ def build_dashboard_html(dirpath: Path) -> str:
 <body>
   <div class="header">
     <h1>🏙️ 香港一手住宅行情看板</h1>
-    <div class="sub">数据来源：土地注册处一手成交 · 地政总署预售批出 · 锚点回推 · 数据截至 {data['kpi']['effective_month']} · 更新时间 {data['kpi']['last_update']}</div>
+    <div class="sub">数据来源：土地注册处 · 地政总署 / CSDI · house730 · 中原地产 · 锚点回推 · 数据截至 {data['kpi']['effective_month']} · 更新时间 {data['kpi']['last_update']}</div>
   </div>
 
   <div class="container">
@@ -363,9 +381,10 @@ def build_dashboard_html(dirpath: Path) -> str:
         <div class="hint">{pending_market['projects']} 个项目 / {pending_market['applications']} 宗申请 · 点击查看明细 ▸</div>
       </div>
       <div class="kpi">
-        <div class="label">当月净变化（批出-成交）</div>
-        <div class="value">{data['kpi']['effective_presale'] - data['kpi']['effective_primary']:+,}<sub> 伙</sub></div>
-        <div class="hint">批出减成交，即时可售增减</div>
+        <div class="label">本月成交注册{mtd_as_of_txt}</div>
+        <div class="value">{mtd_primary_txt}<sub> 宗一手</sub></div>
+        <div class="value2">{mtd_secondary_txt}<sub> 宗二手</sub></div>
+        <div class="hint">私人住宅 · 临时数字，月底定案</div>
       </div>
     </div>
 

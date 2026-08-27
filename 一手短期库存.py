@@ -56,6 +56,9 @@ PENDING_SUMMARY_RE = re.compile(
     re.I,
 )
 
+# 中原「土地注册处12个月统计」：本月至今的注册宗数（临时数字，月底会定案）
+CENTA_LANDREG_URL = "https://hk.centanet.com/info/land-registry/12months"
+
 # 中原城市领先指数 CCL：周度，1993-12 至今
 CCL_CHART_URL = "https://hk.centanet.com/CCI/api/Index/CCLChart"
 CCL_REFERER = "https://hk.centanet.com/CCI/index"
@@ -785,6 +788,50 @@ def build_pending_presale_monthly(
     return out
 
 
+def fetch_month_to_date_registrations() -> dict | None:
+    """本月至今的一手 / 二手住宅注册宗数（只取私人住宅的「總數」行）。
+
+    中原那页是服务端渲染的静态表格，不用浏览器。表格按地区拆开
+    （香港 / 九龍 / 新界東 / 新界西 / 總數），只有「總數」才是全港数字。
+    当月那一列的表头带「(截至N日)」，是尚未定案的临时数字。
+    """
+    s = _requests_session(referer=CENTA_LANDREG_URL)
+    html = _http_get(s, CENTA_LANDREG_URL, timeout=90).text
+    tables = pd.read_html(io.StringIO(html), header=None)
+    if not tables:
+        raise RuntimeError("中原注册统计页没解析出表格")
+    t = tables[0]
+    t = t.astype(object).where(pd.notna(t), "").astype(str)
+
+    header = " ".join(t.iat[0, c] for c in range(t.shape[1]))
+    m = re.search(r"截至\s*(\d{4})-(\d{2})-(\d{2})", header)
+    as_of = f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ""
+
+    # 当月列：表头里带「N月」且带「截至」的那一列
+    col = None
+    for c in range(t.shape[1] - 1, 2, -1):
+        h = t.iat[0, c]
+        if "月" in h and "截至" in h and "年" not in h:
+            col = c
+            break
+    if col is None:
+        raise RuntimeError(f"没找到「截至N日」的当月列，表头: {header[:160]}")
+    month_label = re.sub(r"\s+", "", t.iat[0, col])
+
+    def pick(kind: str) -> int | None:
+        for i in range(t.shape[0]):
+            if kind in t.iat[i, 0] and "私人住宅" in t.iat[i, 1] and "總數" in t.iat[i, 2]:
+                return _to_int_safe(t.iat[i, col])
+        return None
+
+    primary, secondary = pick("一手住宅"), pick("二手住宅")
+    if primary is None or secondary is None:
+        raise RuntimeError("没找到一手/二手的私人住宅總數行")
+    print(f"  本月成交注册（{month_label}，临时）: 一手 {primary:,} 宗 / 二手 {secondary:,} 宗")
+    return {"as_of": as_of, "month_label": month_label,
+            "primary_deals": primary, "secondary_deals": secondary}
+
+
 def fetch_ccl_monthly() -> pd.DataFrame:
     """中原城市领先指数 CCL：周度序列取每月最后一个观测值作为该月时点数。"""
     s = _requests_session(referer=CCL_REFERER)
@@ -940,6 +987,13 @@ def main() -> None:
                   f"（已剔除资助房屋），月报 Summary 含资助为 {want:,} 伙")
     except Exception as e:
         print(f"  [待批] 获取失败，本次跳过: {e}")
+    try:
+        mtd = fetch_month_to_date_registrations()
+        if mtd:
+            pd.DataFrame([mtd]).to_csv(out_dir / "month_to_date_registrations.csv",
+                                       index=False, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"  [本月成交] 获取失败，本次跳过: {e}")
     try:
         ccl = fetch_ccl_monthly()
         ccl.to_csv(out_dir / "ccl_monthly.csv", index=False, encoding="utf-8-sig")
