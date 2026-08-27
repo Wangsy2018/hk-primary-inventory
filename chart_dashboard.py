@@ -288,9 +288,13 @@ def build_dashboard_html(dirpath: Path) -> str:
             "last_update": last_update,
         },
     }
+    mtd_ok = mtd["primary"] is not None and mtd["secondary"] is not None
     mtd_as_of_txt = f"（截至 {mtd['as_of']}）" if mtd["as_of"] else ""
-    mtd_primary_txt = f"{mtd['primary']:,}" if mtd["primary"] is not None else "—"
-    mtd_secondary_txt = f"{mtd['secondary']:,}" if mtd["secondary"] is not None else "—"
+    mtd_primary_txt = f"{mtd['primary']:,}" if mtd_ok else "—"
+    mtd_secondary_txt = f"{mtd['secondary']:,}" if mtd_ok else "—"
+    # 缺数据时说清楚是没抓到，而不是让人对着两个破折号猜
+    mtd_hint = ("私人住宅 · 临时数字，月底定案" if mtd_ok
+                else "本次未取到中原注册统计，见 Actions 日志")
 
     data_json = json.dumps(data, ensure_ascii=False)
 
@@ -384,7 +388,7 @@ def build_dashboard_html(dirpath: Path) -> str:
         <div class="label">本月成交注册{mtd_as_of_txt}</div>
         <div class="value">{mtd_primary_txt}<sub> 宗一手</sub></div>
         <div class="value2">{mtd_secondary_txt}<sub> 宗二手</sub></div>
-        <div class="hint">私人住宅 · 临时数字，月底定案</div>
+        <div class="hint">{mtd_hint}</div>
       </div>
     </div>
 
