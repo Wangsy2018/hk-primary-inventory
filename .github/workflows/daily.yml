@@ -97,11 +97,16 @@ jobs:
             echo "dashboard.html 未生成，中止发布以保留线上现有页面" >&2
             exit 1
           fi
-          mkdir -p pages_build/assets
+          mkdir -p pages_build/assets/pwa
           cp out_inventory/dashboard.html pages_build/index.html
           if [ -f out_inventory/assets/echarts.min.js ]; then
             cp out_inventory/assets/echarts.min.js pages_build/assets/echarts.min.js
           fi
+          # PWA：manifest / service worker / 图标。sw.js 必须和 index.html 同级，
+          # 否则它的作用域覆盖不到整个站点
+          cp out_inventory/manifest.json pages_build/manifest.json
+          cp out_inventory/sw.js pages_build/sw.js
+          cp out_inventory/assets/pwa/*.png pages_build/assets/pwa/
           echo "=== pages_build contents ==="
           find pages_build -type f
 

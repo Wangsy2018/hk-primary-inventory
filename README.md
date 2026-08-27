@@ -16,6 +16,27 @@ GitHub 的定时不保证准时，偶尔会延后数小时。
 > 刚部署完的 10 分钟内可能仍看到旧版 —— GitHub Pages 的 CDN 固定发 `cache-control: max-age=600`。
 > 强制刷新用 `Cmd+Shift+R`，或在网址后加 `?v=1`。日常查看碰不到。
 
+## 装到手机（PWA）
+
+用 Android Chrome 打开看板网址，地址栏会提示「安装应用」/「加入主畫面」；
+iOS Safari 走「分享 → 加入主畫面」。装完是独立图标、点开全屏无地址栏，
+和原生 App 观感一致。
+
+实现：`chart_dashboard.py` 在生成看板时一并产出 `manifest.json`、`sw.js` 和图标，
+workflow 把它们和 `index.html` 一起发布。
+
+- **`sw.js` 必须和 `index.html` 同级**，否则作用域覆盖不到整个站点
+- 缓存策略：页面**网络优先**（每次打开都是最新数据，断网才回退缓存）；
+  1 MB 的 `echarts.min.js` 与图标**缓存优先**，这是第二次秒开的关键
+- `sw.js` 里的 `VERSION` 是构建时间戳，每次发布都会换掉旧缓存；
+  新版本接管后页面自动刷新一次，不会卡在旧缓存上
+- 图标源文件在 `assets/pwa/`，由 `tools` 里的一段 Pillow 脚本画出（深蓝底白色柱状图），
+  换图标直接替换这三个 PNG 即可
+
+> 想要能安装、能上架的 **.apk**：把网址丢进 [PWABuilder](https://www.pwabuilder.com/)
+> 就能生成签名好的 Android 包（底层是 Chrome 的 TWA，仍然渲染这个网页），
+> 不需要 Android Studio。上 Google Play 另需开发者账号。
+
 ## 本地运行（PyCharm）
 
 ```bash

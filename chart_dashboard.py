@@ -14,6 +14,7 @@ import pandas as pd
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR = PROJECT_DIR / "out_inventory"
 
+PWA_ICON_DIR = PROJECT_DIR / "assets" / "pwa"
 ECHARTS_LOCAL = PROJECT_DIR / "assets" / "echarts.min.js"
 ECHARTS_CDN = "https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"
 
@@ -340,6 +341,13 @@ def build_dashboard_html(dirpath: Path) -> str:
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>香港一手住宅行情看板</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1f3a5f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="一手行情">
+<link rel="apple-touch-icon" href="assets/pwa/icon-192.png">
+<link rel="icon" type="image/png" sizes="192x192" href="assets/pwa/icon-192.png">
 <script src="{echarts_src}"></script>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -879,12 +887,29 @@ def build_dashboard_html(dirpath: Path) -> str:
     }}
   }});
 
+  // ---------- PWA：注册 service worker ----------
+  var reloading = false;
+  function reloadOnce() {{
+    if (reloading) return;
+    reloading = true;
+    location.reload();
+  }}
+  if ('serviceWorker' in navigator) {{
+    window.addEventListener('load', function(){{
+      navigator.serviceWorker.register('sw.js').catch(function(e){{
+        console.warn('sw register failed', e);
+      }});
+    }});
+    // 新版本接管后刷新一次，免得装成 App 后一直看旧缓存
+    navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+  }}
+
   // 标签页在手机上常常一开就是好几天。切回来且距上次加载超过 10 分钟就自己刷新，
   // 免得看到的是几天前的数字。正在看图时不会打断（只在重新可见时触发）。
   var loadedAt = Date.now();
   document.addEventListener('visibilitychange', function(){{
     if (!document.hidden && Date.now() - loadedAt > 10 * 60 * 1000) {{
-      location.reload();
+      reloadOnce();
     }}
   }});
 </script>
@@ -909,7 +934,103 @@ def generate(out_dir: Path) -> Path:
     target = out_dir / "dashboard.html"
     target.write_text(html, encoding="utf-8")
     print(f"[看板] 已生成: {target}")
+
+    _write_pwa_files(out_dir)
     return target
+
+
+PWA_MANIFEST = {
+    "name": "香港一手住宅行情看板",
+    "short_name": "一手行情",
+    # 用相对路径，GitHub Pages 的项目站点在 /<仓库名>/ 子路径下也能用
+    "start_url": ".",
+    "scope": ".",
+    "display": "standalone",
+    "background_color": "#f4f6fa",
+    "theme_color": "#1f3a5f",
+    "lang": "zh-HK",
+    "description": "香港一手住宅市场：可售货量、在售项目、待批预售、成交与 CCL",
+    "icons": [
+        {"src": "assets/pwa/icon-192.png", "sizes": "192x192", "type": "image/png"},
+        {"src": "assets/pwa/icon-512.png", "sizes": "512x512", "type": "image/png"},
+        {"src": "assets/pwa/icon-maskable-512.png", "sizes": "512x512",
+         "type": "image/png", "purpose": "maskable"},
+    ],
+}
+
+# 缓存策略：页面走「网络优先、断网回退缓存」，保证每次打开都是最新数据；
+# echarts 和图标走「缓存优先」，1MB 的库不必每次重下，这是秒开的关键。
+SW_TEMPLATE = """// 自动生成，请勿手改
+const VERSION = '__VERSION__';
+const CACHE = 'hk-dash-' + VERSION;
+const PRECACHE = [
+  './', './index.html', './manifest.json',
+  './assets/echarts.min.js',
+  './assets/pwa/icon-192.png', './assets/pwa/icon-512.png'
+];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(PRECACHE)).then(() => self.skipWaiting()));
+});
+
+self.addEventListener('activate', (e) => {
+  e.waitUntil(
+    caches.keys()
+      .then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+
+  // 页面：网络优先，断网时回退到缓存
+  if (req.mode === 'navigate') {
+    e.respondWith(
+      fetch(req)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put('./index.html', copy));
+          return res;
+        })
+        .catch(() => caches.match('./index.html'))
+    );
+    return;
+  }
+
+  // 静态资源：缓存优先
+  e.respondWith(
+    caches.match(req).then((hit) => hit || fetch(req).then((res) => {
+      const copy = res.clone();
+      caches.open(CACHE).then((c) => c.put(req, copy));
+      return res;
+    }))
+  );
+});
+"""
+
+
+def _write_pwa_files(out_dir: Path) -> None:
+    """manifest / service worker / 图标，装成手机 App 用。"""
+    import shutil
+    from datetime import datetime, timezone
+
+    (out_dir / "manifest.json").write_text(
+        json.dumps(PWA_MANIFEST, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 版本号变了 service worker 才会换缓存，所以用构建时间戳
+    version = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    (out_dir / "sw.js").write_text(SW_TEMPLATE.replace("__VERSION__", version), encoding="utf-8")
+
+    icons = out_dir / "assets" / "pwa"
+    icons.mkdir(parents=True, exist_ok=True)
+    n = 0
+    if PWA_ICON_DIR.exists():
+        for f in PWA_ICON_DIR.glob("*.png"):
+            shutil.copy2(f, icons / f.name)
+            n += 1
+    print(f"[看板] PWA: manifest + sw.js(v{version}) + {n} 个图标")
 
 
 def main() -> None:
