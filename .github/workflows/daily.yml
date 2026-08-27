@@ -2,8 +2,10 @@ name: Daily inventory check & deploy dashboard
 
 on:
   schedule:
-    # UTC 01:30 ≈ 香港时间 09:30，每天自动运行
-    - cron: "30 1 * * *"
+    # UTC 21:43 ≈ 香港时间次日 05:43。GitHub 的 schedule 走共享 runner 池、
+    # 不保证准时，整点前后最挤（大量仓库都设 0 分），所以挑了个零碎的分钟数
+    # 和冷门时段；实测设 01:30 时曾延迟 10 小时。早上起来数据已是新的。
+    - cron: "43 21 * * *"
   # 改了代码 push 上来就重建网页，省得手动 Run 一次（用 GITHUB_TOKEN 的
   # 机器人提交不会再触发 workflow，不会自我循环）
   push:

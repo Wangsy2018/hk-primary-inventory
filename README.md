@@ -8,7 +8,8 @@
 ### **<https://wangsy2018.github.io/hk-primary-inventory/>**
 
 固定网址，任何设备打开都是最新数据，无需安装或登录。
-每天香港时间 **09:30** 自动更新（UTC 01:30），代码 push 到 `main` 时也会立即重建。
+每天香港时间约 **05:43** 自动更新（UTC 21:43），代码 push 到 `main` 时也会立即重建。
+GitHub 的定时不保证准时，偶尔会延后数小时。
 
 手机上可「加到主画面 / 添加到主屏幕」，当成 App 用。
 
@@ -62,7 +63,10 @@ git push -u origin main
 
 工作流文件：`.github/workflows/daily.yml`
 
-- 定时：**每天 UTC 01:30**（约香港 **09:30**）
+- 定时：**每天 UTC 21:43**（约香港次日 **05:43**）
+  > GitHub 的 schedule 走共享 runner 池、**不保证准时**，整点前后最拥挤。
+  > 实测设 `30 1 * * *` 时曾延迟 10 小时才跑。所以挑了零碎分钟数 + 冷门时段。
+  > 网页顶部的「更新时间」已换算成香港时间并标注 HKT（runner 系统时区是 UTC）。
 - **push 到 `main` 也会触发**，代码一改网页立即重建（机器人用 `GITHUB_TOKEN` 的提交不会再触发，不会自我循环）
 - 也可在 GitHub **Actions** 页手动 **Run workflow**
 

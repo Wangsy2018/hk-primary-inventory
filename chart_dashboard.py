@@ -263,8 +263,12 @@ def build_dashboard_html(dirpath: Path) -> str:
                 if kpi_units and int(last_line) != kpi_units else f"{int(last_line):,} 伙"
             )
 
-    from datetime import datetime
-    last_update = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # GitHub runner 的系统时区是 UTC，直接 now() 会打出 UTC 时间，
+    # 对着一个香港市场的看板看很容易误读，所以固定换算成港时
+    from datetime import datetime, timedelta, timezone
+    last_update = datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=8))
+    ).strftime("%Y-%m-%d %H:%M") + " HKT"
 
     data = {
         "months": months, "inv": inv_vals,
