@@ -788,6 +788,97 @@ def build_pending_presale_monthly(
     return out
 
 
+def fetch_centaline_monthly() -> pd.DataFrame:
+    """中原「土地注册处12个月统计」的逐月一手 / 二手注册宗数（私人住宅 總數）。
+
+    表格按地区拆开，只有「總數」是全港数字；最后一列是当月至今（表头带「截至N日」），
+    是尚未定案的临时数字。返回列：month / cen_primary / cen_secondary / partial_day。
+    """
+    s = _requests_session(referer=CENTA_LANDREG_URL)
+    html = _http_get(s, CENTA_LANDREG_URL, timeout=90).text
+    tables = pd.read_html(io.StringIO(html), header=None)
+    if not tables:
+        raise RuntimeError("中原注册统计页没解析出表格")
+    t = tables[0]
+    t = t.astype(object).where(pd.notna(t), "").astype(str)
+
+    header = " ".join(t.iat[0, c] for c in range(t.shape[1]))
+    m = re.search(r"截至\s*(\d{4})-(\d{2})-(\d{2})", header)
+    if not m:
+        raise RuntimeError(f"表头里没找到「截至YYYY-MM-DD」: {header[:160]}")
+    end_month = date(int(m.group(1)), int(m.group(2)), 1)
+    partial_day = int(m.group(3))
+
+    # 月份列：表头形如「2025年9月」「10月」「8月(截至26日)」，排除右侧的年度汇总列
+    cols = []
+    for c in range(3, t.shape[1]):
+        h = re.sub(r"\s+", "", t.iat[0, c])
+        if re.search(r"\d{1,2}月", h) and "總計" not in h and "各類型" not in h:
+            cols.append(c)
+    if not cols:
+        raise RuntimeError("没找到月份列")
+    # 列是从左到右按月递增的，最后一列即 end_month
+    months = [month_str((end_month + relativedelta(months=-(len(cols) - 1 - i))).replace(day=1))
+              for i in range(len(cols))]
+
+    def row_vals(kind: str) -> list[int | None]:
+        for i in range(t.shape[0]):
+            if kind in t.iat[i, 0] and "私人住宅" in t.iat[i, 1] and "總數" in t.iat[i, 2]:
+                return [_to_int_safe(t.iat[i, c]) for c in cols]
+        raise RuntimeError(f"没找到「{kind} / 私人住宅 / 總數」行")
+
+    df = pd.DataFrame({
+        "month": months,
+        "cen_primary": row_vals("一手住宅"),
+        "cen_secondary": row_vals("二手住宅"),
+    })
+    df["partial_day"] = [None] * (len(df) - 1) + [partial_day]
+    return df
+
+
+def apply_centaline_fallback(sales: pd.DataFrame, cen: pd.DataFrame) -> pd.DataFrame:
+    """土地注册处一般滞后 1~2 个月，缺的月份用中原的注册宗数顶上并标注。
+
+    一手两边差 0~30 宗（0.5~2%）几乎同口径；二手差 410~934 宗（10~17%），
+    中原按私人住宅口径、注册处的 ASP 口径更宽。两者都顶，标注为「暂时」，
+    注册处公布后会被真实数字换掉。
+
+    返回的是**看板专用**的一份，不参与变更比对与库存回推 —— 中原当月数字每天在变，
+    混进被比对的文件会导致天天发「数据已更新」邮件。
+    """
+    out = sales.copy()
+    out["source"] = "landreg"
+    out["note"] = ""
+
+    have = out[(out["primary_units"] > 0) | (out["secondary_units"] > 0)]["month"]
+    if have.empty:
+        return out
+    last_real = have.max()
+
+    cen_map = {r["month"]: r for _, r in cen.iterrows()}
+    filled = []
+    for i, row in out.iterrows():
+        ym = row["month"]
+        if ym <= last_real or ym not in cen_map:
+            continue
+        c = cen_map[ym]
+        pri, sec = c["cen_primary"], c["cen_secondary"]
+        if (pri is None or pd.isna(pri)) and (sec is None or pd.isna(sec)):
+            continue
+        day = c["partial_day"]
+        note = "暂时" if pd.isna(day) else f"暂至{int(day)}号"
+        if pri is not None and not pd.isna(pri):
+            out.at[i, "primary_units"] = int(pri)
+        if sec is not None and not pd.isna(sec):
+            out.at[i, "secondary_units"] = int(sec)
+        out.at[i, "source"] = "centaline"
+        out.at[i, "note"] = note
+        filled.append(f"{ym}({note}) 一手 {int(pri):,} / 二手 {int(sec):,}")
+    if filled:
+        print(f"  成交数据：注册处最新到 {last_real}，之后用中原顶上 -> {'; '.join(filled)}")
+    return out
+
+
 def fetch_month_to_date_registrations() -> dict | None:
     """本月至今的一手 / 二手住宅注册宗数（只取私人住宅的「總數」行）。
 
@@ -999,6 +1090,14 @@ def main() -> None:
         ccl.to_csv(out_dir / "ccl_monthly.csv", index=False, encoding="utf-8-sig")
     except Exception as e:
         print(f"  [CCL] 获取失败，本次跳过: {e}")
+
+    # 看板专用：注册处缺的月份用中原顶上（不影响下面的回推与变更比对）
+    try:
+        cen = fetch_centaline_monthly()
+        apply_centaline_fallback(sales, cen).to_csv(
+            out_dir / "landreg_display_monthly.csv", index=False, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"  [中原顶替] 跳过，看板将只用注册处数据: {e}")
 
     print("[4/4] 计算即时可售货量 …")
     inv = compute_inventory_by_anchor_backcast(

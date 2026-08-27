@@ -96,6 +96,10 @@ def build_dashboard_html(dirpath: Path) -> str:
     projects_df = _load_optional_csv(dirpath, "projects_inventory.csv")
     pending_proj_df = _load_optional_csv(dirpath, "pending_projects.csv")
     mtd_df = _load_optional_csv(dirpath, "month_to_date_registrations.csv")
+    # 注册处缺的月份已用中原顶上；没有这份就退回纯注册处数据
+    landreg_disp = _load_optional_csv(dirpath, "landreg_display_monthly.csv")
+    if landreg_disp is None:
+        landreg_disp = landreg
     echarts_src = resolve_echarts_src(dirpath)
 
     # 合并月度批出 / 成交，统一用 YYYY-MM 字符串作 key
@@ -106,13 +110,21 @@ def build_dashboard_html(dirpath: Path) -> str:
         on="ym", how="left",
     )
     monthly = monthly.merge(
-        landreg[["month", "primary_units"]].rename(columns={"month": "ym"}),
+        landreg_disp[["month", "primary_units"]].rename(columns={"month": "ym"}),
         on="ym", how="left",
     )
     monthly["presale_approved_units"] = monthly["presale_approved_units"].fillna(0)
     monthly["primary_units"] = monthly["primary_units"].fillna(0)
 
     months = _month_label(inv)
+    # 哪些月份的一手是中原顶上的（临时数字），图上要标出来
+    prov_note = {}
+    if "source" in landreg_disp.columns:
+        for r in landreg_disp.fillna("").to_dict("records"):
+            if str(r.get("source")) == "centaline":
+                prov_note[str(r["month"])] = str(r.get("note") or "暂时")
+    primary_prov = [prov_note.get(mth, "") for mth in months]
+
     inv_vals = [None if pd.isna(v) else int(v) for v in inv["instant_saleable_inventory"]]
     pending_vals = [None if v is None else int(v)
                     for v in _series_by_month(pending_df, months, "pending_units")]
@@ -139,6 +151,15 @@ def build_dashboard_html(dirpath: Path) -> str:
     ccl_vals = _series_by_month(ccl_df, long_months, "ccl")
     secondary_vals = [None if v is None else int(v)
                       for v in _series_by_month(landreg_full, long_months, "secondary_units")]
+    # 长横轴上的二手：注册处缺的月份同样用中原顶上
+    disp_sec = {str(r["month"]): r.get("secondary_units")
+                for r in landreg_disp.to_dict("records")}
+    long_prov = []
+    for k, mth in enumerate(long_months):
+        n = prov_note.get(mth, "")
+        long_prov.append(n)
+        if n and disp_sec.get(mth) is not None and not pd.isna(disp_sec[mth]):
+            secondary_vals[k] = int(disp_sec[mth])
     # 月末官方未发布时 CSV 里补的是 0，画成零高柱会误导
     for i in range(len(secondary_vals) - 1, -1, -1):
         if secondary_vals[i]:
@@ -195,12 +216,16 @@ def build_dashboard_html(dirpath: Path) -> str:
     # 月末那几个月官方还没发布，CSV 里补的是 0。画成 0 会变成一根假的零高柱、
     # 以及一段假的库存平台，所以画图时截断成 null（CCL / 待批各自有真实覆盖，不动）。
     data_end = len(months) - 1
-    while data_end >= 0 and not (presale_vals[data_end] or primary_vals[data_end]):
+    while data_end >= 0 and not (
+        presale_vals[data_end] or (primary_vals[data_end] and not primary_prov[data_end])
+    ):
         data_end -= 1
     for i in range(data_end + 1, len(months)):
         presale_vals[i] = None
-        primary_vals[i] = None
         inv_vals[i] = None
+        # 顶替上来的临时一手数要保留，其余照旧抹掉
+        if not primary_prov[i]:
+            primary_vals[i] = None
 
     # house730 逐盘在售货量：KPI 第二格 + 点开的项目列表
     projects: list[dict] = []
@@ -275,11 +300,12 @@ def build_dashboard_html(dirpath: Path) -> str:
         "months": months, "inv": inv_vals,
         "pending": pending_vals,
         "long_months": long_months, "ccl": ccl_vals, "secondary": secondary_vals,
+        "secondary_prov": long_prov,
         "yr_labels": yr_labels, "yr_pri_units": yr_pri_units, "yr_sec_units": yr_sec_units,
         "yr_pri_amt": yr_pri_amt, "yr_sec_amt": yr_sec_amt,
         "projects": projects, "market": market,
         "pending_projects": pending_projects, "pending_market": pending_market,
-        "presale": presale_vals, "primary": primary_vals,
+        "presale": presale_vals, "primary": primary_vals, "primary_prov": primary_prov,
         "q_keys": q_keys, "q_presale": q_presale, "q_primary": q_primary,
         "m_annual": m_annual, "q_annual": q_annual,
         "kpi": {
@@ -288,6 +314,16 @@ def build_dashboard_html(dirpath: Path) -> str:
             "last_update": last_update,
         },
     }
+    prov_months = [m for m, n in zip(months, primary_prov) if n]
+    fallback_note = (
+        "注：土地注册处的成交数据一般滞后 1~2 个月。缺失月份的一手 / 二手成交暂用"
+        "中原「土地注册处12个月统计」的私人住宅注册宗数顶上，画成<b>浅色虚边柱</b>，"
+        "悬停会显示「暂时」或「暂至N号」。一手两边差 0.5~2%、二手差 10~17%（口径不同），"
+        "但仍是<b>临时数字</b>，注册处公布后会被真实数字替换。"
+        if prov_months else
+        "注：土地注册处的成交数据一般滞后 1~2 个月；当前无需用中原数据顶替。"
+    )
+
     mtd_ok = mtd["primary"] is not None and mtd["secondary"] is not None
     mtd_as_of_txt = f"（截至 {mtd['as_of']}）" if mtd["as_of"] else ""
     mtd_primary_txt = f"{mtd['primary']:,}" if mtd_ok else "—"
@@ -409,6 +445,7 @@ def build_dashboard_html(dirpath: Path) -> str:
 
     <div class="chart-card">
       <h2>批出楼花 vs 一手成交（月度 · 年度合计标注）</h2>
+      <div class="chart-note">{fallback_note}</div>
       <div id="chart-flow" class="chart"></div>
     </div>
 
@@ -570,7 +607,11 @@ def build_dashboard_html(dirpath: Path) -> str:
         axisPointer: {{ type: 'shadow' }},
         formatter: function(ps) {{
           var s = ps[0].axisValue + '<br/>';
-          ps.forEach(function(p){{ s += p.marker + p.seriesName + ': <b>' + Number(Math.abs(p.value)).toLocaleString() + '</b> 伙<br/>'; }});
+          ps.forEach(function(p){{
+            var v = (p.data && p.data.value !== undefined) ? p.data.value : p.value;
+            var note = (p.data && p.data.note) ? '（' + p.data.note + '）' : '';
+            s += p.marker + p.seriesName + ': <b>' + Number(Math.abs(v)).toLocaleString() + '</b> 伙' + note + '<br/>';
+          }});
           return s;
         }}
       }},
@@ -596,8 +637,15 @@ def build_dashboard_html(dirpath: Path) -> str:
   }}
 
   // ---------- 图2：月度蝴蝶图 ----------
+  // 注册处缺的月份用中原顶上，画成浅色虚边以示区别
+  var primaryMonthly = D.primary.map(function(v, i){{
+    if (!D.primary_prov[i]) return v;
+    return {{ value: v, note: D.primary_prov[i],
+             itemStyle: {{ color: '#f3a9a9', borderColor: '#d62728',
+                          borderType: 'dashed', borderWidth: 1 }} }};
+  }});
   var flowChart = echarts.init(document.getElementById('chart-flow'));
-  flowChart.setOption(butterfly(D.months, D.presale, D.primary, D.m_annual, 0));
+  flowChart.setOption(butterfly(D.months, D.presale, primaryMonthly, D.m_annual, 0));
   flowChart.getZr().on('click', function(){{ /* 占位，后续可做点击联动 */ }});
 
   // ---------- 图3：季度蝴蝶图 ----------
@@ -623,9 +671,11 @@ def build_dashboard_html(dirpath: Path) -> str:
       formatter: function(ps) {{
         var s = ps[0].axisValue + '<br/>';
         ps.forEach(function(p){{
-          if (p.value == null) return;
+          var v = (p.data && p.data.value !== undefined) ? p.data.value : p.value;
+          if (v == null) return;
           var unit = (p.seriesName === 'CCL') ? '' : ' 伙';
-          s += p.marker + p.seriesName + ': <b>' + Number(p.value).toLocaleString() + '</b>' + unit + '<br/>';
+          var note = (p.data && p.data.note) ? '（' + p.data.note + '）' : '';
+          s += p.marker + p.seriesName + ': <b>' + Number(v).toLocaleString() + '</b>' + unit + note + '<br/>';
         }});
         return s;
       }}
@@ -661,7 +711,13 @@ def build_dashboard_html(dirpath: Path) -> str:
         ]) }}
       }},
       {{
-        name: '二手成交', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: D.secondary,
+        name: '二手成交', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
+        data: D.secondary.map(function(v, i){{
+          if (!D.secondary_prov[i]) return v;
+          return {{ value: v, note: D.secondary_prov[i],
+                   itemStyle: {{ color: '#c3c3ea', borderColor: '#7f7fd5',
+                                borderType: 'dashed', borderWidth: 1 }} }};
+        }}),
         itemStyle: {{ color: '#7f7fd5' }}, barMaxWidth: 14
       }}
     ]
