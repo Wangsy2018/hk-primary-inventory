@@ -326,6 +326,10 @@ def build_dashboard_html(dirpath: Path) -> str:
     )
 
     mtd_ok = mtd["primary"] is not None and mtd["secondary"] is not None
+    # 别写「本月」：跨月那几天中原还没开出新月份的列，9 月 1 号看到的其实是 8 月的数
+    mtd_month_txt = "成交注册"
+    if mtd["as_of"]:
+        mtd_month_txt = f"{int(mtd['as_of'][5:7])}月成交注册"
     mtd_as_of_txt = f"（截至 {mtd['as_of']}）" if mtd["as_of"] else ""
     mtd_primary_txt = f"{mtd['primary']:,}" if mtd_ok else "—"
     mtd_secondary_txt = f"{mtd['secondary']:,}" if mtd_ok else "—"
@@ -429,7 +433,7 @@ def build_dashboard_html(dirpath: Path) -> str:
         <div class="hint">{pending_market['projects']} 个项目 / {pending_market['applications']} 宗申请 · 点击查看明细 ▸</div>
       </div>
       <div class="kpi">
-        <div class="label">本月成交注册{mtd_as_of_txt}</div>
+        <div class="label">{mtd_month_txt}{mtd_as_of_txt}</div>
         <div class="value">{mtd_primary_txt}<sub> 宗一手</sub></div>
         <div class="value2">{mtd_secondary_txt}<sub> 宗二手</sub></div>
         <div class="hint">{mtd_hint}</div>
