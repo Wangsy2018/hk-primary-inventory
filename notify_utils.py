@@ -62,6 +62,10 @@ def compare_with_baseline(baseline_dir: Path, current_dir: Path) -> list[FileCha
         file_rows: list[dict] = []
 
         for _, row in merged.iterrows():
+            # 暂时数据（中原顶替）每天都在变，计入比对会天天发「数据已更新」
+            if str(row.get("provisional_old") or "").strip() or \
+                    str(row.get("provisional_new") or "").strip():
+                continue
             if row["_merge"] == "left_only":
                 file_rows.append({"month": row[key], "change": "removed"})
                 continue
@@ -70,7 +74,7 @@ def compare_with_baseline(baseline_dir: Path, current_dir: Path) -> list[FileCha
                 continue
 
             for col in old_df.columns:
-                if col == key:
+                if col in (key, "provisional"):
                     continue
                 old_v = row.get(f"{col}_old")
                 new_v = row.get(f"{col}_new")

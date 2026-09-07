@@ -47,6 +47,13 @@ LANDSD_CONSENT_INDEX = (
     "dev-control-compliance/consent/presale.html"
 )
 LANDSD_PENDING_PDF = "https://www.landsd.gov.hk/doc/en/consent/monthly/t2_{yymm}.pdf"
+# 同一批月报里的 t1 是「当月批出」的同意书，用来补 CSDI 图层的滞后
+LANDSD_ISSUED_PDF = "https://www.landsd.gov.hk/doc/en/consent/monthly/t1_{yymm}.pdf"
+_ISSUED_SUMMARY_RE = re.compile(
+    r"Total no\. of Pre-?sale Consent \(Residential\)\s+issued\s*:\s*([\d,]+)\s*"
+    r"Total no\. of residential units involved\s*:\s*([\d,]+)",
+    re.I,
+)
 # 2018 起: "... applications pending approval : N" + "... units involved : M"
 # 2016-17: "... pending approval : N"              + "... units pending approval : M"
 PENDING_SUMMARY_RE = re.compile(
@@ -222,7 +229,9 @@ def build_presale_approvals_monthly(
     months = [month_str(d) for d in month_range_inclusive(start, end)]
     out = pd.DataFrame({"month": months}).merge(g, on="month", how="left")
     out["presale_approved_units"] = out["presale_approved_units"].fillna(0).astype(int)
-    return out
+    # 图层实际收录到哪个月。不能用「最后一个非零月」判断 —— 有些月份真的是 0 批出
+    src_last = str(df["month"].max()) if not df.empty else None
+    return out, src_last
 
 
 def _landreg_rows_to_frame(
@@ -264,6 +273,68 @@ def fetch_landreg_primary_periods(s: requests.Session) -> list[tuple[str, str]]:
             if slug == "agt-primary" or slug.startswith("agt-pri-"):
                 periods.append((str(b.get("title") or "").strip(), slug))
     return periods
+
+
+def fetch_issued_consents(s: requests.Session, ym: str) -> tuple[int, int] | None:
+    """某月批出的预售同意书（住宅）：返回 (份数, 住宅单位数)，取自月报 t1 的末页 Summary。"""
+    import pdfplumber
+
+    yymm = ym[2:4] + ym[5:7]
+    r = _http_get(s, LANDSD_ISSUED_PDF.format(yymm=yymm), timeout=120)
+    if r.status_code != 200:
+        return None
+    with pdfplumber.open(io.BytesIO(r.content)) as pdf:
+        text = "\n".join((pg.extract_text() or "") for pg in pdf.pages[-2:])
+    m = _ISSUED_SUMMARY_RE.search(re.sub(r"\s+", " ", text))
+    if not m:
+        return None
+    return int(m.group(1).replace(",", "")), int(m.group(2).replace(",", ""))
+
+
+def apply_landsd_issued_override(
+    approvals: pd.DataFrame, csdi_last: str | None, end: date, lookback: int = 2
+) -> pd.DataFrame:
+    """CSDI 的批出图层滞后 1~2 个月，用地政署月报 t1 的合计补上。
+
+    这是**同口径精确替换**，不是估算：2024-12 ~ 2026-07 抽查 10 个月，
+    PDF 的 Summary 与 CSDI 的汇总逐月完全相等。月报只在月底之后发布，
+    数值是终稿不会再变，所以不会给变更通知制造噪音。
+
+    补的范围：CSDI 覆盖之后的月份，外加它最后覆盖的 lookback 个月
+    （防止图层只收了半个月的数据）。
+    """
+    s = _requests_session(referer=LANDSD_CONSENT_INDEX)
+    available = set(fetch_pending_available_months(s))
+    if not available:
+        return approvals
+
+    in_range = [m for m in approvals["month"] if m <= month_str(end)]
+    if csdi_last:
+        targets = [m for m in in_range if m <= csdi_last][-lookback:] + \
+                  [m for m in in_range if m > csdi_last]
+    else:
+        targets = in_range[-lookback:]
+    targets = [m for m in targets if m in available]
+    if not targets:
+        return approvals
+
+    out = approvals.copy()
+    idx = {m: i for i, m in enumerate(out["month"])}
+    changed = []
+    for ym in targets:
+        got = fetch_issued_consents(s, ym)
+        if got is None:
+            continue
+        n, units = got
+        old = int(out.at[idx[ym], "presale_approved_units"])
+        if old != units:
+            out.at[idx[ym], "presale_approved_units"] = units
+            changed.append(f"{ym}: {old:,} -> {units:,}（{n} 份同意书）")
+    if changed:
+        print(f"  批出：CSDI 收录到 {csdi_last}，用地政署月报补正 -> {'; '.join(changed)}")
+    else:
+        print(f"  批出：CSDI 收录到 {csdi_last}，与月报一致")
+    return out
 
 
 def build_landreg_primary_monthly_via_json(
@@ -1036,7 +1107,11 @@ def main() -> None:
     print()
 
     print("[1/4] 正在下载政府 ArcGIS 预售批出伙数 …")
-    approvals = build_presale_approvals_monthly(start=start, end=end)
+    approvals, approvals_src_last = build_presale_approvals_monthly(start=start, end=end)
+    try:
+        approvals = apply_landsd_issued_override(approvals, approvals_src_last, end)
+    except Exception as e:
+        print(f"  [批出补正] 跳过，沿用 CSDI 数据: {e}")
     approvals.to_csv(out_dir / "presale_approvals_monthly.csv", index=False, encoding="utf-8-sig")
 
     if args.landreg_primary_csv:
@@ -1091,18 +1166,34 @@ def main() -> None:
     except Exception as e:
         print(f"  [CCL] 获取失败，本次跳过: {e}")
 
-    # 看板专用：注册处缺的月份用中原顶上（不影响下面的回推与变更比对）
+    # 注册处缺的月份用中原顶上，标注为暂时数据。回推也用这份，否则「有批出没成交」
+    # 的月份会算出虚高的库存。被顶替的月份带 provisional 标记，变更比对会跳过它们
+    # —— 中原当月数字每天在变，否则会天天发「数据已更新」邮件。
+    sales_for_calc = sales
     try:
         cen = fetch_centaline_monthly()
-        apply_centaline_fallback(sales, cen).to_csv(
-            out_dir / "landreg_display_monthly.csv", index=False, encoding="utf-8-sig")
+        sales_for_calc = apply_centaline_fallback(sales, cen)
+        sales_for_calc.to_csv(out_dir / "landreg_display_monthly.csv",
+                              index=False, encoding="utf-8-sig")
     except Exception as e:
-        print(f"  [中原顶替] 跳过，看板将只用注册处数据: {e}")
+        print(f"  [中原顶替] 跳过，回推与看板只用注册处数据: {e}")
 
     print("[4/4] 计算即时可售货量 …")
     inv = compute_inventory_by_anchor_backcast(
-        approvals, sales, args.anchor_month, args.anchor_inventory
+        approvals, sales_for_calc, args.anchor_month, args.anchor_inventory
     )
+    # 标出哪些月份用了暂时数据：这些行不参与变更比对
+    prov = dict(zip(sales_for_calc.get("month", []), sales_for_calc.get("note", [])))
+    inv["provisional"] = [str(prov.get(m) or "") for m in inv["month"]]
+    inv = inv.drop(columns=[c for c in ("source", "note") if c in inv.columns])
+    # 批出与成交都没有的月份（比如刚跨月），库存没有意义，留空
+    both_missing = (inv["presale_approved_units"] == 0) & (inv["primary_units"] == 0)
+    if both_missing.any():
+        inv["instant_saleable_inventory"] = inv["instant_saleable_inventory"].astype("Int64")
+        inv.loc[both_missing, "instant_saleable_inventory"] = pd.NA
+    n_prov = int((inv["provisional"] != "").sum())
+    if n_prov:
+        print(f"  库存：{n_prov} 个月用了暂时成交数据（已标注，不参与变更比对）")
     inv.to_csv(out_dir / "instant_saleable_inventory_monthly.csv", index=False, encoding="utf-8-sig")
 
     # 待批数据获取已注释

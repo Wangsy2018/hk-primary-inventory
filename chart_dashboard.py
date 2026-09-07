@@ -125,6 +125,8 @@ def build_dashboard_html(dirpath: Path) -> str:
             if str(r.get("source")) == "centaline":
                 prov_note[str(r["month"])] = str(r.get("note") or "暂时")
     primary_prov = [prov_note.get(mth, "") for mth in months]
+    inv_prov = (["" if pd.isna(v) else str(v) for v in inv["provisional"]]
+                if "provisional" in inv.columns else list(primary_prov))
 
     inv_vals = [None if pd.isna(v) else int(v) for v in inv["instant_saleable_inventory"]]
     pending_vals = [None if v is None else int(v)
@@ -216,16 +218,16 @@ def build_dashboard_html(dirpath: Path) -> str:
 
     # 月末那几个月官方还没发布，CSV 里补的是 0。画成 0 会变成一根假的零高柱、
     # 以及一段假的库存平台，所以画图时截断成 null（CCL / 待批各自有真实覆盖，不动）。
-    data_end = len(months) - 1
-    while data_end >= 0 and not (
-        presale_vals[data_end] or (primary_vals[data_end] and not primary_prov[data_end])
-    ):
-        data_end -= 1
-    for i in range(data_end + 1, len(months)):
-        presale_vals[i] = None
-        inv_vals[i] = None
-        # 顶替上来的临时一手数要保留，其余照旧抹掉
-        if not primary_prov[i]:
+    # 三条序列的可用范围现在各不相同：批出能补到最新月（地政署月报）、成交靠中原顶、
+    # 库存两者都要。所以逐条判断，只抹掉真正没有数据的点。
+    for i in range(len(months)):
+        # 成交是暂时数据、批出又是 0，说明地政署当月月报还没出 ——
+        # 那是「未知」不是「零批出」，画成空白而不是一根零高柱
+        if primary_prov[i] and not presale_vals[i]:
+            presale_vals[i] = None
+        elif not presale_vals[i] and not primary_vals[i]:
+            presale_vals[i] = None
+        if not primary_vals[i] and not primary_prov[i]:
             primary_vals[i] = None
 
     # house730 逐盘在售货量：KPI 第二格 + 点开的项目列表
@@ -307,10 +309,12 @@ def build_dashboard_html(dirpath: Path) -> str:
         "projects": projects, "market": market,
         "pending_projects": pending_projects, "pending_market": pending_market,
         "presale": presale_vals, "primary": primary_vals, "primary_prov": primary_prov,
+        "inv_prov": inv_prov,
         "q_keys": q_keys, "q_presale": q_presale, "q_primary": q_primary,
         "m_annual": m_annual, "q_annual": q_annual,
         "kpi": {
             "effective_month": eff_month, "effective_inv": eff_inv,
+            "effective_prov": inv_prov[eff_index] if eff_index < len(inv_prov) else "",
             "effective_presale": eff_presale, "effective_primary": eff_primary,
             "last_update": last_update,
         },
@@ -324,6 +328,11 @@ def build_dashboard_html(dirpath: Path) -> str:
         if prov_months else
         "注：土地注册处的成交数据一般滞后 1~2 个月；当前无需用中原数据顶替。"
     )
+
+    eff_prov = data["kpi"].get("effective_prov") or ""
+    eff_hint = ("锚点回推所得；该月成交尚未公布，用中原暂时数据代入，会随注册处公布调整"
+                if eff_prov else "锚点回推所得，即时可售")
+    eff_prov_txt = f" · {eff_prov}" if eff_prov else ""
 
     mtd_ok = mtd["primary"] is not None and mtd["secondary"] is not None
     # 别写「本月」：跨月那几天中原还没开出新月份的列，9 月 1 号看到的其实是 8 月的数
@@ -418,9 +427,9 @@ def build_dashboard_html(dirpath: Path) -> str:
   <div class="container">
     <div class="kpis">
       <div class="kpi">
-        <div class="label">即时可售货量（{data['kpi']['effective_month']}）</div>
+        <div class="label">即时可售货量（{data['kpi']['effective_month']}{eff_prov_txt}）</div>
         <div class="value">{data['kpi']['effective_inv']:,}<sub> 伙</sub></div>
-        <div class="hint">锚点回推所得，即时可售</div>
+        <div class="hint">{eff_hint}</div>
       </div>
       <div class="kpi kpi--click" id="kpi-market" role="button" tabindex="0">
         <div class="label">当前市场在售货量</div>
@@ -558,8 +567,10 @@ def build_dashboard_html(dirpath: Path) -> str:
       formatter: function(ps) {{
         var s = ps[0].axisValue + '<br/>';
         ps.forEach(function(p){{
+          var v = (p.data && p.data.value !== undefined) ? p.data.value : p.value;
+          var note = (p.data && p.data.note) ? '（' + p.data.note + '）' : '';
           s += p.marker + p.seriesName + ': <b>' +
-               (p.value==null ? '—' : Number(p.value).toLocaleString()) + '</b> 伙<br/>';
+               (v==null ? '—' : Number(v).toLocaleString()) + '</b> 伙' + note + '<br/>';
         }});
         return s;
       }}
@@ -574,7 +585,14 @@ def build_dashboard_html(dirpath: Path) -> str:
     ],
     series: [
       {{
-        name: '即时可售货量', type: 'line', data: D.inv, smooth: true,
+        name: '即时可售货量', type: 'line', smooth: true,
+        // 用暂时成交数算出来的月份画成空心点，提示这几个点会随注册处公布而变
+        data: D.inv.map(function(v, i){{
+          if (!D.inv_prov[i]) return v;
+          return {{ value: v, note: D.inv_prov[i],
+                   symbol: 'emptyCircle', symbolSize: 8,
+                   itemStyle: {{ color: '#fff', borderColor: '#1f6feb', borderWidth: 2 }} }};
+        }}),
         symbol: 'circle', symbolSize: 5,
         lineStyle: {{ width: 3, color: '#1f6feb' }},
         itemStyle: {{ color: '#1f6feb' }},
