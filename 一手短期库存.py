@@ -8,7 +8,7 @@ import math
 import re
 import time
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -279,6 +279,7 @@ def fetch_issued_consents(s: requests.Session, ym: str) -> tuple[int, int] | Non
     """某月批出的预售同意书（住宅）：返回 (份数, 住宅单位数)，取自月报 t1 的末页 Summary。"""
     import pdfplumber
 
+    _quiet_pdfminer()
     yymm = ym[2:4] + ym[5:7]
     r = _http_get(s, LANDSD_ISSUED_PDF.format(yymm=yymm), timeout=120)
     if r.status_code != 200:
@@ -293,8 +294,11 @@ def fetch_issued_consents(s: requests.Session, ym: str) -> tuple[int, int] | Non
 
 def apply_landsd_issued_override(
     approvals: pd.DataFrame, csdi_last: str | None, end: date, lookback: int = 2
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, str | None]:
     """CSDI 的批出图层滞后 1~2 个月，用地政署月报 t1 的合计补上。
+
+    返回 (补正后的表, 批出数据已知到哪个月)。后者用来决定库存算到哪个月 ——
+    没有批出就没法回推，硬算会得出假数。
 
     这是**同口径精确替换**，不是估算：2024-12 ~ 2026-07 抽查 10 个月，
     PDF 的 Summary 与 CSDI 的汇总逐月完全相等。月报只在月底之后发布，
@@ -306,7 +310,7 @@ def apply_landsd_issued_override(
     s = _requests_session(referer=LANDSD_CONSENT_INDEX)
     available = set(fetch_pending_available_months(s))
     if not available:
-        return approvals
+        return approvals, csdi_last
 
     in_range = [m for m in approvals["month"] if m <= month_str(end)]
     if csdi_last:
@@ -316,15 +320,17 @@ def apply_landsd_issued_override(
         targets = in_range[-lookback:]
     targets = [m for m in targets if m in available]
     if not targets:
-        return approvals
+        return approvals, csdi_last
 
     out = approvals.copy()
     idx = {m: i for i, m in enumerate(out["month"])}
     changed = []
+    known = csdi_last
     for ym in targets:
         got = fetch_issued_consents(s, ym)
         if got is None:
             continue
+        known = ym if known is None else max(known, ym)
         n, units = got
         old = int(out.at[idx[ym], "presale_approved_units"])
         if old != units:
@@ -334,7 +340,7 @@ def apply_landsd_issued_override(
         print(f"  批出：CSDI 收录到 {csdi_last}，用地政署月报补正 -> {'; '.join(changed)}")
     else:
         print(f"  批出：CSDI 收录到 {csdi_last}，与月报一致")
-    return out
+    return out, known
 
 
 def build_landreg_primary_monthly_via_json(
@@ -643,6 +649,7 @@ def fetch_pending_month(s: requests.Session, ym: str) -> tuple[int, int] | None:
     """
     import pdfplumber
 
+    _quiet_pdfminer()
     yymm = ym[2:4] + ym[5:7]
     r = s.get(LANDSD_PENDING_PDF.format(yymm=yymm), timeout=120)
     if r.status_code != 200:
@@ -687,22 +694,130 @@ def fetch_pending_projects(s: requests.Session) -> list[dict]:
         with zf.open(names[0]) as fh:
             df = pd.read_csv(fh)
 
-    out, dropped = [], []
+    out = []
     for rec in df.to_dict("records"):
         row = {k: ("" if pd.isna(rec.get(col)) else str(rec.get(col)).strip())
                for k, col in _PENDING_FIELD_MAP.items()}
         if not row["units"].replace(",", "").isdigit():
             continue
-        # 资助出售房屋不算私人市场货量。NSEARCH12_EN 直接标了 Subsidised Sale Flats，
-        # 卖方名单再兜一道，免得漏标。注意市建局(URA)不带这个标记，是公开市场发售，不剔。
-        if "subsid" in row["category"].lower() or \
-                any(k in row["vendor"].lower() for k in PENDING_EXCLUDED_VENDORS):
-            dropped.append(row)
-            continue
         out.append(row)
-    if dropped:
-        n = sum(int(r["units"].replace(",", "")) for r in dropped)
-        print(f"    剔除资助出售房屋 {len(dropped)} 宗申请 / {n:,} 伙")
+    return out
+
+
+# t2 明细表的列边界（PDF 里的竖线位置）与字段顺序
+_PENDING_PDF_COLS = [21.6, 76.8, 138.4, 199.8, 261.4, 329.3, 384.4, 457.3,
+                     513.9, 563.6, 622.2, 677.0, 725.0, 781.9, 900.0]
+_PENDING_PDF_FIELDS = ["lot", "address", "name", "vendor", "holding", "solicitors",
+                       "ap_company", "contractor", "mortgagee", "bank", "financier",
+                       "emd", "units", "remarks"]
+_DDMMYYYY = re.compile(r"^\d{2}/\d{2}/\d{4}$")
+
+
+def _quiet_pdfminer() -> None:
+    """pdfminer 对每一页都喊一句 CropBox missing，会把 Actions 日志刷屏。"""
+    import logging
+
+    for name in ("pdfminer", "pdfminer.pdfpage", "pdfplumber"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+
+def _as_of_date(v: str) -> date | None:
+    try:
+        return datetime.strptime((v or "").strip(), "%d %B %Y").date()
+    except ValueError:
+        return None
+
+
+def fetch_pending_projects_from_pdf(s: requests.Session, ym: str) -> list[dict]:
+    """从月报 t2 的明细表逐条解析待批申请（住宅部分）。
+
+    CSDI 的结构化明细比月报晚约一个月，所以哪边新用哪边。表格没有竖线分隔行，
+    只能按词的坐标切列；一条申请的起点是「同时出现预计落成日期和单位数」的那一行。
+    """
+    import collections
+
+    import pdfplumber
+
+    _quiet_pdfminer()
+    yymm = ym[2:4] + ym[5:7]
+    r = _http_get(s, LANDSD_PENDING_PDF.format(yymm=yymm), timeout=120)
+    if r.status_code != 200:
+        return []
+
+    def col_of(w):
+        c = (w["x0"] + w["x1"]) / 2
+        for i in range(len(_PENDING_PDF_COLS) - 1):
+            if _PENDING_PDF_COLS[i] <= c < _PENDING_PDF_COLS[i + 1]:
+                return i
+        return None
+
+    recs: list[dict] = []
+    cur: dict | None = None
+    with pdfplumber.open(io.BytesIO(r.content)) as pdf:
+        inside = False
+        for pg in pdf.pages:
+            heads = [ln.strip() for ln in (pg.extract_text() or "").split("\n")]
+            # 页眉每页都写着 "...Presale Consent and Consent to Assign..."，
+            # 区块标题必须整行精确匹配，不能用子串
+            if "Presale Consent for Residential Development" in heads:
+                inside = True
+            elif any(h.startswith(("Presale Consent for Non-Residential",
+                                   "Consent to Assign for", "Summary")) for h in heads):
+                inside = False
+            if not inside:
+                continue
+
+            lines: dict[int, list] = collections.defaultdict(list)
+            for w in pg.extract_words():
+                lines[round(w["top"])].append(w)
+            header_y = None
+            for y in sorted(lines):
+                txt = " ".join(w["text"] for w in sorted(lines[y], key=lambda w: w["x0"]))
+                if txt.startswith("Lot No. Address"):
+                    header_y = y
+                    break
+            if header_y is None:
+                continue
+
+            for y in [y for y in sorted(lines) if y > header_y]:
+                cells: dict[int, list[str]] = collections.defaultdict(list)
+                for w in sorted(lines[y], key=lambda w: w["x0"]):
+                    k = col_of(w)
+                    if k is not None:
+                        cells[k].append(w["text"])
+                row = {_PENDING_PDF_FIELDS[k]: " ".join(v) for k, v in cells.items()}
+                if _DDMMYYYY.match(row.get("emd", "")) and \
+                        row.get("units", "").replace(",", "").isdigit():
+                    if cur:
+                        recs.append(cur)
+                    cur = {f: [] for f in _PENDING_PDF_FIELDS}
+                if cur is None:
+                    continue
+                for f in _PENDING_PDF_FIELDS:
+                    if row.get(f):
+                        cur[f].append(row[f])
+    if cur:
+        recs.append(cur)
+
+    as_of = month_str(parse_month(ym))
+    last_day = (parse_month(ym) + relativedelta(months=1) - timedelta(days=1))
+    out = []
+    for rec in recs:
+        r2 = {f: " ".join(v).strip() for f, v in rec.items()}
+        emd = r2.get("emd", "")
+        m = re.match(r"(\d{2})/(\d{2})/(\d{4})$", emd)
+        out.append({
+            "lot": r2.get("lot", ""),
+            "address": r2.get("address", ""),
+            "name": r2.get("name", ""),
+            "vendor": r2.get("vendor", ""),
+            # 统一成 CSDI 那边的 "31 December 2028" 写法，下游共用同一套解析
+            "emd": (date(int(m.group(3)), int(m.group(2)), int(m.group(1))).strftime("%d %B %Y")
+                    if m else ""),
+            "units": r2.get("units", ""),
+            "category": "",          # 月报没有「资助房屋」标记，只能靠卖方名单剔除
+            "as_of": last_day.strftime("%d %B %Y"),
+        })
     return out
 
 
@@ -750,6 +865,22 @@ def build_pending_projects(records: list[dict]) -> pd.DataFrame:
     大多还是 Pending，根本对不上（NKIL 6458 的三期名字全叫 "Pending (Phase N)"）。
     实测 7 个多期组的卖方完全一致，所以加上卖方只会更稳，不会拆散任何一组。
     """
+    # 资助出售房屋不算私人市场货量。CSDI 有 Subsidised Sale Flats 标记，
+    # 月报 PDF 没有这一列，所以两条来源都靠卖方名单兜底。
+    # 注意市建局(URA)不带这个标记、是公开市场发售，不剔。
+    kept, dropped = [], []
+    for r in records:
+        if "subsid" in (r.get("category") or "").lower() or \
+                any(k in (r.get("vendor") or "").lower() for k in PENDING_EXCLUDED_VENDORS):
+            dropped.append(r)
+        else:
+            kept.append(r)
+    if dropped:
+        n = sum(int(str(r.get("units", "0")).replace(",", "") or 0)
+                for r in dropped if str(r.get("units", "")).replace(",", "").isdigit())
+        print(f"    剔除资助出售房屋 {len(dropped)} 宗申请 / {n:,} 伙")
+    records = kept
+
     groups: dict[tuple[str, str], list[dict]] = {}
     for r in records:
         units = r.get("units", "").replace(",", "")
@@ -1109,8 +1240,10 @@ def main() -> None:
     print("[1/4] 正在下载政府 ArcGIS 预售批出伙数 …")
     approvals, approvals_src_last = build_presale_approvals_monthly(start=start, end=end)
     try:
-        approvals = apply_landsd_issued_override(approvals, approvals_src_last, end)
+        approvals, approvals_last = apply_landsd_issued_override(
+            approvals, approvals_src_last, end)
     except Exception as e:
+        approvals_last = approvals_src_last
         print(f"  [批出补正] 跳过，沿用 CSDI 数据: {e}")
     approvals.to_csv(out_dir / "presale_approvals_monthly.csv", index=False, encoding="utf-8-sig")
 
@@ -1139,8 +1272,23 @@ def main() -> None:
             start, end, PENDING_HISTORY_CSV, backfill=args.pending_backfill
         )
         pending.to_csv(out_dir / "pending_presale_monthly.csv", index=False, encoding="utf-8-sig")
-        # 逐项目明细（CSDI 当前快照），给看板第三个 KPI 和它点开的列表用
+        # 逐项目明细：CSDI 的结构化数据比地政署月报晚约一个月，哪边的截至日新用哪边
         recs = fetch_pending_projects(_requests_session())
+        csdi_as_of = _as_of_date(recs[0]["as_of"]) if recs else None
+        latest_report = pending.dropna(subset=["pending_units"])["month"].max()
+        if isinstance(latest_report, str):
+            try:
+                s_pdf = _requests_session(referer=LANDSD_CONSENT_INDEX)
+                pdf_recs = fetch_pending_projects_from_pdf(s_pdf, latest_report)
+                pdf_as_of = _as_of_date(pdf_recs[0]["as_of"]) if pdf_recs else None
+                if pdf_recs and (csdi_as_of is None or (pdf_as_of and pdf_as_of > csdi_as_of)):
+                    print(f"  待批明细：改用月报 {latest_report}（截至 {pdf_as_of}），"
+                          f"CSDI 只到 {csdi_as_of}")
+                    recs = pdf_recs
+                else:
+                    print(f"  待批明细：CSDI（截至 {csdi_as_of}）不比月报旧，沿用 CSDI")
+            except Exception as e:
+                print(f"  待批明细：月报解析失败，沿用 CSDI: {e}")
         if recs:
             proj = build_pending_projects(recs)
             proj.to_csv(out_dir / "pending_projects.csv", index=False, encoding="utf-8-sig")
@@ -1186,11 +1334,15 @@ def main() -> None:
     prov = dict(zip(sales_for_calc.get("month", []), sales_for_calc.get("note", [])))
     inv["provisional"] = [str(prov.get(m) or "") for m in inv["month"]]
     inv = inv.drop(columns=[c for c in ("source", "note") if c in inv.columns])
-    # 批出与成交都没有的月份（比如刚跨月），库存没有意义，留空
-    both_missing = (inv["presale_approved_units"] == 0) & (inv["primary_units"] == 0)
-    if both_missing.any():
-        inv["instant_saleable_inventory"] = inv["instant_saleable_inventory"].astype("Int64")
-        inv.loc[both_missing, "instant_saleable_inventory"] = pd.NA
+    # 库存只算到「批出已公布」的月份为止。成交可以用暂时数据顶，批出不行 ——
+    # 没有批出就没有新增货量，硬算等于假设当月零批出，会把库存越算越低。
+    inv["instant_saleable_inventory"] = inv["instant_saleable_inventory"].astype("Int64")
+    if approvals_last:
+        beyond = inv["month"] > approvals_last
+        if beyond.any():
+            inv.loc[beyond, "instant_saleable_inventory"] = pd.NA
+            inv.loc[beyond, "provisional"] = ""
+            print(f"  库存：批出数据已知到 {approvals_last}，之后 {int(beyond.sum())} 个月不计算")
     n_prov = int((inv["provisional"] != "").sum())
     if n_prov:
         print(f"  库存：{n_prov} 个月用了暂时成交数据（已标注，不参与变更比对）")
