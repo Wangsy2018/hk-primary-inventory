@@ -76,6 +76,44 @@ def _refresh_house730() -> None:
             print("[run_daily] 无可回退结果，看板将不显示在售项目列表")
 
 
+LAND_CHAIN_SCRIPT = PROJECT_DIR / "land_chain.py"
+LAND_CHAIN_LAST_GOOD = PROJECT_DIR / "data" / "history" / "land_chain.json"
+
+
+def _refresh_land_chain() -> None:
+    """项目地图数据（CSDI 八个图层串成的地→楼→售链）。
+
+    月度数据，抓失败就用上次的，地图照样能看。上次结果只在内容变了才回写，
+    免得每次跑都改一个 700KB 的文件进仓库。
+    """
+    import json
+    import subprocess
+
+    out = OUT_DIR / "land_chain.json"
+    try:
+        subprocess.run(
+            [sys.executable, str(LAND_CHAIN_SCRIPT), "--out", str(out)],
+            check=True, cwd=str(PROJECT_DIR),
+        )
+        new = json.loads(out.read_text(encoding="utf-8"))
+        old = json.loads(LAND_CHAIN_LAST_GOOD.read_text(encoding="utf-8")) if LAND_CHAIN_LAST_GOOD.exists() else None
+        strip = lambda d: {k: v for k, v in d.items() if k != "generated"}     # noqa: E731
+        if old is None or strip(old) != strip(new):
+            LAND_CHAIN_LAST_GOOD.parent.mkdir(parents=True, exist_ok=True)
+            LAND_CHAIN_LAST_GOOD.write_bytes(out.read_bytes())
+            print("[run_daily] 项目地图数据有变化，已存档")
+        else:
+            print("[run_daily] 项目地图数据无变化")
+    except Exception as e:
+        print(f"[run_daily] 项目地图数据抓取失败: {e}")
+        if LAND_CHAIN_LAST_GOOD.exists():
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(LAND_CHAIN_LAST_GOOD.read_bytes())
+            print(f"[run_daily] 已回退到上次成功的结果（{LAND_CHAIN_LAST_GOOD.name}）")
+        else:
+            print("[run_daily] 无可回退结果，看板地图将提示数据缺失")
+
+
 def _regenerate_chart_from_output() -> None:
     """生成交互式 HTML 看板（ECharts），供 GitHub Pages 网页版查看。（已停用研报 PDF/PNG）"""
     sys.path.insert(0, str(PROJECT_DIR))
@@ -110,6 +148,7 @@ def main() -> int:
         sys.argv = old_argv
 
     _refresh_house730()
+    _refresh_land_chain()
     _regenerate_chart_from_output()
 
 

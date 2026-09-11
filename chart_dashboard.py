@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from map_section import MAP_CSS, MAP_HTML, MAP_JS
+
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR = PROJECT_DIR / "out_inventory"
 
@@ -416,12 +418,13 @@ def build_dashboard_html(dirpath: Path) -> str:
   .bar > i {{ position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: #1f6feb; }}
   .pctnum {{ min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }}
   @media (max-width: 800px) {{ .kpis {{ grid-template-columns: repeat(2, 1fr); }} }}
+{MAP_CSS}
 </style>
 </head>
 <body>
   <div class="header">
     <h1>🏙️ 香港一手住宅行情看板</h1>
-    <div class="sub">数据来源：土地注册处 · 地政总署 / CSDI · house730 · 中原地产 · 锚点回推 · 数据截至 {data['kpi']['effective_month']} · 更新时间 {data['kpi']['last_update']}</div>
+    <div class="sub">数据来源：土地注册处 · 地政总署 / CSDI · house730 · 中原地产 · 锚点回推 · 数据截至 {data['kpi']['effective_month']} · 更新时间 {data['kpi']['last_update']} · <a href="#map-sec" style="color:#cfe0ff">🗺 项目地图</a></div>
   </div>
 
   <div class="container">
@@ -484,6 +487,7 @@ def build_dashboard_html(dirpath: Path) -> str:
       <h2>中原城市领先指数 CCL 与二手成交（上下分区共用横轴 · CCL 自 1994 年、二手成交自 2002 年，默认近 3 年，可拖到最早）</h2>
       <div id="chart-second" class="chart"></div>
     </div>
+{MAP_HTML}
   </div>
 
   <div class="ov" id="ov">
@@ -935,6 +939,7 @@ def build_dashboard_html(dirpath: Path) -> str:
     }}
   }});
 </script>
+{MAP_JS}
 </body>
 </html>
 """

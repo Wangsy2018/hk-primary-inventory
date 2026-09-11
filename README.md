@@ -159,12 +159,25 @@ python chart_dashboard.py
 | `一手短期库存.py` | 主程序：抓四个数据源 + 锚点回推，输出 CSV/Excel |
 | `house730_inventory.py` | 抓 house730 逐盘在售货量，输出 `projects_inventory.csv` |
 | `chart_dashboard.py` | 生成交互式 HTML 看板（ECharts），本地 / GitHub Pages 共用；**唯一的图表产物** |
+| `map_section.py` | 看板底部的「项目地图」块（Leaflet + 政府地图瓦片，挡了自动换 OpenStreetMap） |
+| `land_chain.py` | 项目地图数据：抓 CSDI 八个图层（预售、卖地、换地、契约修订、屋宇署批则/动工/OP），按坐标 + 地段号串成「地→楼→售」链，输出 `land_chain.json` |
 | `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
 | `notify_utils.py` | 数据 diff 与 SMTP 发信 |
 | `data/baseline/` | 上次确认的数据快照（提交到 Git），用于判断「是否有更新」 |
-| `data/history/` | 待批预售楼花逐月历史、house730 日期缓存与上次成功的项目表（均提交到 Git） |
+| `data/history/` | 待批预售楼花逐月历史、house730 日期缓存与上次成功的项目表、上次成功的 `land_chain.json`（均提交到 Git） |
 | `assets/echarts.min.js` | 内嵌的 ECharts 库（网页版离线可用） |
 | `.github/workflows/daily.yml` | GitHub Actions 定时任务 |
+
+## 还原点
+
+地图和土地来源上线前的稳定版本打了 tag `v1-before-map`（同名备份分支 `backup/v1-before-map`）。
+要退回去：
+
+```bash
+git checkout -b rollback v1-before-map
+```
+
+然后把 `rollback` 合并回 `main` 推上去即可；线上页面会在下次 Actions 跑完后恢复。
 
 ## 数据源与抓取方式
 
