@@ -64,12 +64,15 @@ MAP_HTML = """
       <option value="0">全部规模</option><option value="100">≥ 100 伙</option>
       <option value="300">≥ 300 伙</option><option value="1000">≥ 1,000 伙</option>
     </select>
+    <select id="map-size" title="圆点大小按什么算">
+      <option value="units">大小：总伙数</option><option value="remaining">大小：余货</option>
+    </select>
     <input type="text" id="map-q" placeholder="搜项目名 / 地址 / 地段">
   </div>
   <div class="mapsum" id="map-sum">地图数据加载中…</div>
   <div id="map" class="map"></div>
   <div class="map-note">
-    圆点大小按伙数；颜色是土地来源：<b>公开卖地</b>（地政总署卖地记录）、<b>换地 / 契约修订补地价</b>（已签立换地、契约修订记录）、
+    圆点大小默认按总伙数，只勾「在售」时自动改按 house730 余货（也可手动切）；颜色是土地来源：<b>公开卖地</b>（地政总署卖地记录）、<b>换地 / 契约修订补地价</b>（已签立换地、契约修订记录）、
     <b>港铁上盖</b>（预售卖方为港铁 / 九铁物业公司）、<b>市建局</b>、<b>房協</b>。实心 = 在售（house730 有余货）；黑边 = 已批预售但 house730 未见开售；
     虚边 = 屋宇署已发施工同意书但未批预售；空心 = 已批地但屋宇署未发施工同意书；淡色 = 已售罄 / 已入伙。各图层之间没有共同编号，靠坐标（30 米内）和地段号对上，大型屋苑一个点对应多个屋宇署地盘，
     伙数以预售同意书为准、屋宇署数字作参考；少数记录官方坐标有误已剔除。点圆点看这块地从批地到入伙的每一步。
@@ -96,7 +99,7 @@ MAP_JS = r"""
     '已批地·未动工':   { fillOpacity: 0.0,  weight: 2.2 }
   };
   var STATUS_ORDER = ['在售', '已批预售·未开售', '已批预售', '已动工·未预售', '已批地·未动工', '已售罄·已入伙', '已入伙·未预售'];
-  var map, layer, data;
+  var map, layer, data, baseNote = '';
   var sumEl = document.getElementById('map-sum');
 
   function note(t) { sumEl.textContent = t; }
@@ -172,10 +175,15 @@ MAP_JS = r"""
     return h;
   }
 
+  var sizeBy = 'units';
+  function sizeValue(s) {
+    if (sizeBy === 'remaining') return s.sale ? s.sale.remaining : 0;
+    return s.presale_units || s.bd_units || 0;
+  }
   function radius(s) {
-    var u = s.presale_units || s.bd_units || 0;
-    if (!u) return 5;
-    return Math.max(4, Math.min(24, Math.sqrt(u) / 2.2));
+    var u = sizeValue(s);
+    if (!u) return sizeBy === 'remaining' ? 3 : 5;
+    return Math.max(4, Math.min(24, Math.sqrt(u) / (sizeBy === 'remaining' ? 1.3 : 2.2)));
   }
 
   function currentFilter() {
@@ -194,7 +202,7 @@ MAP_JS = r"""
     if (!map || !data) return;
     var f = currentFilter();
     layer.clearLayers();
-    var shown = [], units = {}, cnt = {};
+    var shown = [], units = {}, cnt = {}, remaining = 0;
     data.sites.forEach(function (s) {
       if (!f.status[s.status]) return;
       if (f.src && s.source !== f.src) return;
@@ -207,6 +215,7 @@ MAP_JS = r"""
       shown.push(s);
       cnt[s.status] = (cnt[s.status] || 0) + 1;
       units[s.status] = (units[s.status] || 0) + u;
+      if (s.sale) remaining += s.sale.remaining;
     });
     // 大的先画在下面，小的在上面，免得被盖住点不到
     shown.sort(function (a, b) { return radius(b) - radius(a); });
@@ -228,7 +237,8 @@ MAP_JS = r"""
       parts.push(k + ' ' + cnt[k] + ' 个' + (units[k] ? '（' + fmtUnits(units[k]) + ' 伙）' : ''));
     });
     note('显示 ' + shown.length + ' 个地盘：' + (parts.join(' · ') || '无') +
-      ' · 预售至 ' + data.as_of.presale + ' · 屋宇署至 ' + data.as_of.bd_start + ' · 土地记录至 ' + data.as_of.land);
+      (remaining ? ' · 余货合计 ' + fmtUnits(remaining) + ' 伙' : '') +
+      ' · 预售至 ' + data.as_of.presale + ' · 屋宇署至 ' + data.as_of.bd_start + ' · 土地记录至 ' + data.as_of.land + baseNote);
     if (f.q && shown.length && shown.length <= 30) {
       map.fitBounds(L.latLngBounds(shown.map(function (s) { return [s.lat, s.lon]; })).pad(0.3), { maxZoom: 15 });
     }
@@ -247,14 +257,16 @@ MAP_JS = r"""
     // 先探一张政府瓦片：通就默认政府地图并提供卫星图；不通（内地代理常挡 gov.hk）只给 OSM，
     // 免得切到政府地图对着灰底
     var probe = new Image(), decided = false;
+    L.control.layers({ '政府地图': base, '卫星图': sat, 'OpenStreetMap': osm }, null, { position: 'topright' }).addTo(map);
     function useGov() {
       if (decided) return; decided = true;
       base.addTo(map);
-      L.control.layers({ '政府地图': base, '卫星图': sat, 'OpenStreetMap': osm }, null, { position: 'topright' }).addTo(map);
     }
     function useOsm() {
       if (decided) return; decided = true;
       osm.addTo(map);
+      baseNote = ' · 政府地图瓦片（gov.hk）当前网络不可达，已用 OpenStreetMap；右上角可手动切换';
+      if (data) render();
     }
     probe.onload = useGov; probe.onerror = useOsm;
     setTimeout(useOsm, 4000);
@@ -287,7 +299,19 @@ MAP_JS = r"""
       })
       .catch(function (e) { note('地图数据 land_chain.json 加载失败：' + e.message); });
 
-    sec.querySelectorAll('input[data-status], #map-src, #map-min').forEach(function (el) { el.addEventListener('change', render); });
+    var sizeSel = document.getElementById('map-size');
+    sizeSel.addEventListener('change', function () { sizeBy = this.value; render(); });
+    sec.querySelectorAll('input[data-status]').forEach(function (el) {
+      el.addEventListener('change', function () {
+        // 只看在售时，圆点按余货算才有意义；勾回其他状态就回到总伙数
+        var on = Array.prototype.filter.call(sec.querySelectorAll('input[data-status]'), function (c) { return c.checked; })
+          .map(function (c) { return c.getAttribute('data-status'); });
+        sizeBy = (on.length === 1 && on[0] === '在售') ? 'remaining' : 'units';
+        sizeSel.value = sizeBy;
+        render();
+      });
+    });
+    sec.querySelectorAll('#map-src, #map-min').forEach(function (el) { el.addEventListener('change', render); });
     var t;
     document.getElementById('map-q').addEventListener('input', function () { clearTimeout(t); t = setTimeout(render, 250); });
   }
