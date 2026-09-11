@@ -538,13 +538,17 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             continue
         if r.kind == "地段扩展":
             continue
+        # 屋宇署的基础工程同意书表 2023 年才开始有，历史不全，不用它区分地基 / 上盖
+        src = source_of("私人", [{"kind": r.kind}])
         sites.append({
             "id": f"l{k}", "lat": round(float(r.lat), 6), "lon": round(float(r.lon), 6),
             "stage": "批地未动工", "name": str(r.address)[:60] or str(r.lot)[:60], "name_en": "", "phases": [],
             "address": str(r.address), "owner": "私人", "vendor": "",
-            "source": source_of("私人", [{"kind": r.kind}]), "land": land_records([k]),
+            "source": src, "land": land_records([k]),
             "presale_units": 0, "presale_first": "", "presale_last": "",
             "plan_ym": "", "start_ym": "", "bd_units": None, "op_ym": "", "op_units": 0,
+            "area": None if pd.isna(r.area) else int(r.area),
+            "premium_m": None if pd.isna(r.premium_m) else round(float(r.premium_m), 1),
             "ap": "", "applicant": "",
         })
 
@@ -650,7 +654,7 @@ def attach_sales(sites: list[dict], house730_csv: Path | None) -> None:
         if st == "动工未预售":
             s["status"] = "已动工·未预售"
         elif st == "批地未动工":
-            s["status"] = "已批地·未动工"
+            s["status"] = "政府已卖地·未开上盖" if s["source"] == "公开卖地" else "换地补价·未开上盖"
         elif st == "已入伙·未预售":
             s["status"] = "已入伙·未预售"
         elif s["sale"] and s["sale"]["remaining"] > 0:

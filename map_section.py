@@ -56,7 +56,8 @@ MAP_HTML = """
     <label><input type="checkbox" data-status="在售" checked> 在售</label>
     <label><input type="checkbox" data-status="已批预售·未开售" checked> 已批预售·未开售</label>
     <label><input type="checkbox" data-status="已动工·未预售" checked> 已动工·未预售</label>
-    <label><input type="checkbox" data-status="已批地·未动工" checked> 已批地·未动工</label>
+    <label><input type="checkbox" data-status="政府已卖地·未开上盖" checked> 政府已卖地·未开上盖</label>
+    <label><input type="checkbox" data-status="换地补价·未开上盖" checked> 换地/补价·未开上盖</label>
     <label><input type="checkbox" data-status="已售罄·已入伙"> 已售罄·已入伙</label>
     <label><input type="checkbox" data-status="已入伙·未预售"> 已入伙·未预售</label>
     <select id="map-src"><option value="">全部土地来源</option></select>
@@ -74,7 +75,7 @@ MAP_HTML = """
   <div class="map-note">
     圆点大小默认按总伙数，只勾「在售」时自动改按 house730 余货（也可手动切）；颜色是土地来源：<b>公开卖地</b>（地政总署卖地记录）、<b>换地 / 契约修订补地价</b>（已签立换地、契约修订记录）、
     <b>港铁上盖</b>（预售卖方为港铁 / 九铁物业公司）、<b>市建局</b>、<b>房協</b>。实心 = 在售（house730 有余货）；黑边 = 已批预售但 house730 未见开售；
-    虚边 = 屋宇署已发施工同意书但未批预售；空心 = 已批地但屋宇署未发施工同意书；淡色 = 已售罄 / 已入伙。各图层之间没有共同编号，靠坐标（30 米内）和地段号对上，大型屋苑一个点对应多个屋宇署地盘，
+    虚边 = 屋宇署已发施工同意书但未批预售；空心 = 已批地（政府卖地 / 换地补价）但屋宇署未发上盖施工同意书，大小按地盘面积；淡色 = 已售罄 / 已入伙。各图层之间没有共同编号，靠坐标（30 米内）和地段号对上，大型屋苑一个点对应多个屋宇署地盘，
     伙数以预售同意书为准、屋宇署数字作参考；少数记录官方坐标有误已剔除。点圆点看这块地从批地到入伙的每一步。
   </div>
 """
@@ -96,9 +97,10 @@ MAP_JS = r"""
     '已售罄·已入伙':   { fillOpacity: 0.25, weight: 1 },
     '已动工·未预售':   { fillOpacity: 0.55, weight: 2, dashArray: '3,3' },
     '已入伙·未预售':   { fillOpacity: 0.20, weight: 1, dashArray: '3,3' },
-    '已批地·未动工':   { fillOpacity: 0.0,  weight: 2.2 }
+    '政府已卖地·未开上盖': { fillOpacity: 0.0, weight: 2.4 },
+    '换地补价·未开上盖':   { fillOpacity: 0.0, weight: 2.4 }
   };
-  var STATUS_ORDER = ['在售', '已批预售·未开售', '已批预售', '已动工·未预售', '已批地·未动工', '已售罄·已入伙', '已入伙·未预售'];
+  var STATUS_ORDER = ['在售', '已批预售·未开售', '已批预售', '已动工·未预售', '政府已卖地·未开上盖', '换地补价·未开上盖', '已售罄·已入伙', '已入伙·未预售'];
   var map, layer, data, baseNote = '';
   var sumEl = document.getElementById('map-sum');
 
@@ -146,6 +148,7 @@ MAP_JS = r"""
       h += '<tr><td>批地</td><td style="color:#94a3b8">地政总署卖地 / 换地 / 契约修订库中无记录</td></tr>';
     }
     if (s.plan_ym) h += '<tr><td>批则</td><td>' + esc(s.plan_ym) + '</td></tr>';
+    if (s.stage === '批地未动工') h += '<tr><td>上盖</td><td style="color:#94a3b8">屋宇署未发上盖施工同意书</td></tr>';
     if (s.start_ym) h += '<tr><td>动工</td><td>' + esc(s.start_ym) + (s.bd_units != null ? ' · <b>' + fmtUnits(s.bd_units) + '</b> 伙' : '') +
       (s.bd_sites > 1 ? '（' + s.bd_sites + ' 个屋宇署地盘）' : '') + '</td></tr>';
     else if (s.stage !== '批地未动工') h += '<tr><td>动工</td><td style="color:#94a3b8">屋宇署无施工同意书记录</td></tr>';
@@ -182,6 +185,7 @@ MAP_JS = r"""
   }
   function radius(s) {
     var u = sizeValue(s);
+    if (!u && s.stage === '批地未动工' && s.area) return Math.max(4, Math.min(20, Math.sqrt(s.area) / 9));   // 没伙数，按地盘面积
     if (!u) return sizeBy === 'remaining' ? 3 : 5;
     return Math.max(4, Math.min(24, Math.sqrt(u) / (sizeBy === 'remaining' ? 1.3 : 2.2)));
   }
@@ -202,7 +206,7 @@ MAP_JS = r"""
     if (!map || !data) return;
     var f = currentFilter();
     layer.clearLayers();
-    var shown = [], units = {}, cnt = {}, remaining = 0;
+    var shown = [], units = {}, cnt = {}, remaining = 0, premium = {};
     data.sites.forEach(function (s) {
       if (!f.status[s.status]) return;
       if (f.src && s.source !== f.src) return;
@@ -216,6 +220,7 @@ MAP_JS = r"""
       cnt[s.status] = (cnt[s.status] || 0) + 1;
       units[s.status] = (units[s.status] || 0) + u;
       if (s.sale) remaining += s.sale.remaining;
+      if (s.premium_m) premium[s.status] = (premium[s.status] || 0) + s.premium_m;
     });
     // 大的先画在下面，小的在上面，免得被盖住点不到
     shown.sort(function (a, b) { return radius(b) - radius(a); });
@@ -234,7 +239,7 @@ MAP_JS = r"""
     var parts = [];
     STATUS_ORDER.forEach(function (k) {
       if (!cnt[k]) return;
-      parts.push(k + ' ' + cnt[k] + ' 个' + (units[k] ? '（' + fmtUnits(units[k]) + ' 伙）' : ''));
+      parts.push(k + ' ' + cnt[k] + (premium[k] ? ' 幅（地价 ' + (premium[k] / 100).toFixed(0) + ' 亿）' : ' 个' + (units[k] ? '（' + fmtUnits(units[k]) + ' 伙）' : '')));
     });
     note('显示 ' + shown.length + ' 个地盘：' + (parts.join(' · ') || '无') +
       (remaining ? ' · 余货合计 ' + fmtUnits(remaining) + ' 伙' : '') +
@@ -281,7 +286,7 @@ MAP_JS = r"""
         return '<div><i style="background:' + SRC_COLOR[k] + '"></i>' + k + '</div>';
       }).join('') +
         '<div class="st"><i style="background:#334155"></i>实心 在售 &nbsp; <i style="background:#334155;border:2px solid #111"></i>黑边 已批预售未开售<br>' +
-        '<i style="border:2px dashed #334155;background:#33415588"></i>虚边 动工未预售 &nbsp; <i style="border:2px solid #334155"></i>空心 批地未动工</div>';
+        '<i style="border:2px dashed #334155;background:#33415588"></i>虚边 动工未预售 &nbsp; <i style="border:2px solid #334155"></i>空心 已批地未开上盖（大小按面积）</div>';
       return d;
     };
     legend.addTo(map);
