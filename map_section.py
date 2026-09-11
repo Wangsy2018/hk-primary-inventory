@@ -1,23 +1,27 @@
 """
-看板的「项目地图」块：Leaflet + 政府地图瓦片，数据读 land_chain.json（land_chain.py 产出）。
+看板的「项目地图」页（map.html）：Leaflet + 政府地图瓦片，数据读 land_chain.json（land_chain.py 产出）。
 
-单独放一个文件，是为了不把 chart_dashboard 那个 f-string 模板越堆越大；
-这里的三段是普通字符串，花括号不用转义。
+独立一页而不是塞在看板底部：地图要整屏才好用，滚轮 / 拖动也不会和长页面打架。
+看板顶部有 tab 切过来，这页顶部有 tab 切回去。
 """
 
 MAP_CSS = """
-  .map-wrap { position: relative; }
-  .map-wrap.full { position: fixed; inset: 0; z-index: 3000; background: #fff; padding: 12px; overflow: auto; }
-  .map-wrap.full .map { height: calc(100vh - 150px); }
-  .mapbar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; font-size: 13px; color: #334155; margin: 6px 0 8px; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: #f4f6f9; color: #2c3e50; display: flex; flex-direction: column; }
+  .header { background: linear-gradient(135deg, #1f3a5f, #2980b9); color: #fff; padding: 14px 22px 0; }
+  .header h1 { font-size: 20px; font-weight: 700; }
+  .header .sub { font-size: 12px; opacity: 0.9; margin-top: 4px; }
+  .tabs { display: flex; gap: 4px; margin-top: 10px; }
+  .tabs a { color: #cfe0ff; text-decoration: none; font-size: 13px; padding: 7px 14px; border-radius: 8px 8px 0 0; background: rgba(255,255,255,.08); }
+  .tabs a.on { background: #f4f6f9; color: #1f3a5f; font-weight: 700; }
+  .mapbar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 13px; color: #334155; padding: 10px 22px 0; }
   .mapbar label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
   .mapbar select, .mapbar input[type=text] { border: 1px solid #dbe4ee; border-radius: 8px; padding: 5px 8px; font-size: 13px; background: #fff; }
-  .mapbar input[type=text] { width: 180px; }
-  .mapbar button { border: 1px solid #dbe4ee; background: #f8fafc; border-radius: 8px; padding: 5px 10px; font-size: 13px; cursor: pointer; }
-  .mapbar button:hover { background: #eef2f7; }
-  .mapsum { font-size: 12px; color: #64748b; margin-bottom: 6px; }
-  .map { height: 560px; border-radius: 10px; background: #e8eef5; }
-  .map-note { font-size: 12px; color: #94a3b8; margin-top: 8px; line-height: 1.6; }
+  .mapbar input[type=text] { width: 190px; }
+  .mapsum { font-size: 12px; color: #64748b; padding: 6px 22px 8px; }
+  .map { flex: 1; min-height: 320px; background: #e8eef5; }
+  .map-note { font-size: 11.5px; color: #94a3b8; padding: 6px 22px 8px; line-height: 1.6; }
   .leaflet-container { font-family: inherit; }
   .leaflet-popup-content { margin: 12px 14px; font-size: 12.5px; line-height: 1.5; min-width: 240px; max-width: 320px; }
   .leaflet-popup-content h4 { margin: 0 0 2px; font-size: 15px; color: #1f3a5f; }
@@ -34,37 +38,42 @@ MAP_CSS = """
   .map-legend { background: rgba(255,255,255,.93); padding: 8px 10px; border-radius: 8px; font-size: 11.5px; line-height: 1.7; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
   .map-legend i { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
   .map-legend .st { margin-top: 4px; border-top: 1px solid #e2e8f0; padding-top: 4px; }
-  @media (max-width: 800px) { .map { height: 70vh; } .mapbar input[type=text] { width: 100%; } }
+  @media (max-width: 800px) {
+    .header { padding: 10px 14px 0; } .header h1 { font-size: 17px; } .header .sub { display: none; }
+    .mapbar { padding: 8px 12px 0; gap: 4px 10px; font-size: 12px; } .mapbar input[type=text] { width: 100%; }
+    .mapsum, .map-note { padding-left: 12px; padding-right: 12px; } .map-note { display: none; }
+    .map-legend { font-size: 10.5px; line-height: 1.5; }
+  }
 """
 
 MAP_HTML = """
-    <div class="chart-card" id="map-sec">
-      <div class="map-wrap" id="map-wrap">
-        <h2>项目地图：地 → 楼 → 售（地政总署 / 屋宇署官方记录按坐标串联）</h2>
-        <div class="mapbar">
-          <label><input type="checkbox" data-stage="已预售" checked> 已预售·未入伙</label>
-          <label><input type="checkbox" data-stage="动工未预售" checked> 已动工·未预售</label>
-          <label><input type="checkbox" data-stage="批地未动工" checked> 已批地·未动工</label>
-          <label><input type="checkbox" data-stage="已预售·已入伙"> 已预售·已入伙</label>
-          <label><input type="checkbox" data-stage="已入伙·未预售"> 已入伙·未预售</label>
-          <select id="map-src"><option value="">全部土地来源</option></select>
-          <select id="map-min">
-            <option value="0">全部规模</option><option value="100">≥ 100 伙</option>
-            <option value="300">≥ 300 伙</option><option value="1000">≥ 1,000 伙</option>
-          </select>
-          <input type="text" id="map-q" placeholder="搜项目名 / 地址 / 地段">
-          <button id="map-full" type="button">⛶ 全屏</button>
-        </div>
-        <div class="mapsum" id="map-sum">地图数据加载中…</div>
-        <div id="map" class="map"></div>
-        <div class="map-note" id="map-note">
-          圆点大小按伙数；颜色是土地来源：<b>公开卖地</b>（地政总署卖地记录）、<b>换地 / 契约修订补地价</b>（已签立换地、契约修订记录）、
-          <b>港铁上盖</b>（预售卖方为港铁 / 九铁物业公司）、<b>市建局</b>、<b>房協</b>。实心 = 已批预售；虚边 = 屋宇署已发施工同意书但未批预售；
-          空心 = 已批地但屋宇署未发施工同意书。各图层之间没有共同编号，靠坐标（30 米内）和地段号对上，大型屋苑一个点对应多个屋宇署地盘，
-          伙数以预售同意书为准、屋宇署数字作参考；少数记录官方坐标有误已剔除。点圆点看这块地从批地到入伙的每一步。
-        </div>
-      </div>
-    </div>
+  <div class="header">
+    <h1>🗺️ 项目地图：地 → 楼 → 售</h1>
+    <div class="sub">地政总署卖地 / 换地 / 契约修订 · 屋宇署批则 / 动工 / 入伙 · 预售同意书 —— 官方记录按坐标与地段号串联 · 更新时间 __LAST_UPDATE__</div>
+    <div class="tabs"><a href="./">📊 行情看板</a><a class="on" href="map.html">🗺️ 项目地图</a></div>
+  </div>
+  <div class="mapbar" id="map-sec">
+    <label><input type="checkbox" data-status="在售" checked> 在售</label>
+    <label><input type="checkbox" data-status="已批预售·未开售" checked> 已批预售·未开售</label>
+    <label><input type="checkbox" data-status="已动工·未预售" checked> 已动工·未预售</label>
+    <label><input type="checkbox" data-status="已批地·未动工" checked> 已批地·未动工</label>
+    <label><input type="checkbox" data-status="已售罄·已入伙"> 已售罄·已入伙</label>
+    <label><input type="checkbox" data-status="已入伙·未预售"> 已入伙·未预售</label>
+    <select id="map-src"><option value="">全部土地来源</option></select>
+    <select id="map-min">
+      <option value="0">全部规模</option><option value="100">≥ 100 伙</option>
+      <option value="300">≥ 300 伙</option><option value="1000">≥ 1,000 伙</option>
+    </select>
+    <input type="text" id="map-q" placeholder="搜项目名 / 地址 / 地段">
+  </div>
+  <div class="mapsum" id="map-sum">地图数据加载中…</div>
+  <div id="map" class="map"></div>
+  <div class="map-note">
+    圆点大小按伙数；颜色是土地来源：<b>公开卖地</b>（地政总署卖地记录）、<b>换地 / 契约修订补地价</b>（已签立换地、契约修订记录）、
+    <b>港铁上盖</b>（预售卖方为港铁 / 九铁物业公司）、<b>市建局</b>、<b>房協</b>。实心 = 在售（house730 有余货）；黑边 = 已批预售但 house730 未见开售；
+    虚边 = 屋宇署已发施工同意书但未批预售；空心 = 已批地但屋宇署未发施工同意书；淡色 = 已售罄 / 已入伙。各图层之间没有共同编号，靠坐标（30 米内）和地段号对上，大型屋苑一个点对应多个屋宇署地盘，
+    伙数以预售同意书为准、屋宇署数字作参考；少数记录官方坐标有误已剔除。点圆点看这块地从批地到入伙的每一步。
+  </div>
 """
 
 MAP_JS = r"""
@@ -77,20 +86,22 @@ MAP_JS = r"""
     '市建局': '#059669', '房協': '#0891b2', '愉景湾': '#64748b', '未知': '#9ca3af'
   };
   var SRC_ORDER = ['公开卖地', '换地补地价', '契约修订补地价', '港铁上盖', '市建局', '房協', '愉景湾', '未知'];
-  var STAGE_STYLE = {
-    '已预售':       { fillOpacity: 0.85, weight: 1.2 },
-    '已预售·已入伙': { fillOpacity: 0.30, weight: 1 },
-    '动工未预售':   { fillOpacity: 0.55, weight: 2, dashArray: '3,3' },
-    '已入伙·未预售': { fillOpacity: 0.20, weight: 1, dashArray: '3,3' },
-    '批地未动工':   { fillOpacity: 0.0,  weight: 2.2 }
+  var STATUS_STYLE = {
+    '在售':          { fillOpacity: 0.85, weight: 1.2 },
+    '已批预售·未开售': { fillOpacity: 0.85, weight: 2.5, color: '#111' },
+    '已批预售':       { fillOpacity: 0.85, weight: 1.2 },
+    '已售罄·已入伙':   { fillOpacity: 0.25, weight: 1 },
+    '已动工·未预售':   { fillOpacity: 0.55, weight: 2, dashArray: '3,3' },
+    '已入伙·未预售':   { fillOpacity: 0.20, weight: 1, dashArray: '3,3' },
+    '已批地·未动工':   { fillOpacity: 0.0,  weight: 2.2 }
   };
-  var map, layer, data, booted = false;
+  var STATUS_ORDER = ['在售', '已批预售·未开售', '已批预售', '已动工·未预售', '已批地·未动工', '已售罄·已入伙', '已入伙·未预售'];
+  var map, layer, data;
   var sumEl = document.getElementById('map-sum');
 
   function note(t) { sumEl.textContent = t; }
 
   function loadLib() {
-    if (booted) return; booted = true;
     var css = document.createElement('link');
     css.rel = 'stylesheet'; css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
     document.head.appendChild(css);
@@ -100,11 +111,7 @@ MAP_JS = r"""
     js.onerror = function () { note('地图库加载失败（需要联网）'); };
     document.head.appendChild(js);
   }
-  if ('IntersectionObserver' in window) {
-    new IntersectionObserver(function (es) {
-      if (es.some(function (e) { return e.isIntersecting; })) loadLib();
-    }, { rootMargin: '600px' }).observe(sec);
-  } else { loadLib(); }
+  loadLib();
 
   function fmtUnits(n) { return n == null ? '—' : Number(n).toLocaleString('en-US'); }
   function fmtPremium(m) {
@@ -120,7 +127,7 @@ MAP_JS = r"""
     if (s.name_en && s.name_en !== s.name) h += '<div class="en">' + esc(s.name_en) + '</div>';
     h += '<div class="tags"><span style="background:' + (SRC_COLOR[s.source] || '#999') + '22;color:' + (SRC_COLOR[s.source] || '#333') + '">' + esc(s.source) + '</span>';
     if (s.owner && s.owner !== '私人') h += '<span>' + esc(s.owner) + '</span>';
-    h += '<span>' + esc(s.stage) + '</span></div>';
+    h += '<span>' + esc(s.status) + '</span></div>';
     h += '<table class="chain">';
     if (s.land && s.land.length) {
       s.land.slice(0, 3).forEach(function (r) {
@@ -149,6 +156,11 @@ MAP_JS = r"""
       }
       h += '</td></tr>';
     }
+    if (s.sale) {
+      h += '<tr><td>销售</td><td>' + (s.sale.first_sales ? '开售 ' + esc(s.sale.first_sales) + ' · ' : '') +
+        '已售 <b>' + fmtUnits(s.sale.sold) + '</b> / ' + fmtUnits(s.sale.total) + ' · 余 <b>' + fmtUnits(s.sale.remaining) + '</b> 伙' +
+        '<br><span style="color:#94a3b8">house730：' + esc(s.sale.projects.join('、')) + '</span></td></tr>';
+    }
     if (s.op_ym) h += '<tr><td>入伙</td><td>' + esc(s.op_ym) + ' · <b>' + fmtUnits(s.op_units) + '</b> 伙</td></tr>';
     h += '</table>';
     var who = [];
@@ -167,10 +179,11 @@ MAP_JS = r"""
   }
 
   function currentFilter() {
-    var stages = {};
-    sec.querySelectorAll('input[data-stage]').forEach(function (c) { stages[c.getAttribute('data-stage')] = c.checked; });
+    var st = {};
+    sec.querySelectorAll('input[data-status]').forEach(function (c) { st[c.getAttribute('data-status')] = c.checked; });
+    st['已批预售'] = st['已批预售·未开售'] || st['在售'];     // 没有 house730 表时的兜底状态
     return {
-      stages: stages,
+      status: st,
       src: document.getElementById('map-src').value,
       min: +document.getElementById('map-min').value,
       q: document.getElementById('map-q').value.trim().toLowerCase()
@@ -183,7 +196,7 @@ MAP_JS = r"""
     layer.clearLayers();
     var shown = [], units = {}, cnt = {};
     data.sites.forEach(function (s) {
-      if (!f.stages[s.stage]) return;
+      if (!f.status[s.status]) return;
       if (f.src && s.source !== f.src) return;
       var u = s.presale_units || s.bd_units || 0;
       if (f.min && u < f.min) return;
@@ -192,23 +205,25 @@ MAP_JS = r"""
         if (hay.indexOf(f.q) < 0) return;
       }
       shown.push(s);
-      cnt[s.stage] = (cnt[s.stage] || 0) + 1;
-      units[s.stage] = (units[s.stage] || 0) + u;
+      cnt[s.status] = (cnt[s.status] || 0) + 1;
+      units[s.status] = (units[s.status] || 0) + u;
     });
     // 大的先画在下面，小的在上面，免得被盖住点不到
     shown.sort(function (a, b) { return radius(b) - radius(a); });
     shown.forEach(function (s) {
-      var st = STAGE_STYLE[s.stage] || {};
+      var st = STATUS_STYLE[s.status] || {};
       var m = L.circleMarker([s.lat, s.lon], {
-        radius: radius(s), color: SRC_COLOR[s.source] || '#999', fillColor: SRC_COLOR[s.source] || '#999',
+        radius: radius(s), color: st.color || SRC_COLOR[s.source] || '#999', fillColor: SRC_COLOR[s.source] || '#999',
         fillOpacity: st.fillOpacity, weight: st.weight, dashArray: st.dashArray || null, opacity: 0.95
       });
       m.bindPopup(function () { return popupHtml(s); }, { maxWidth: 340 });
-      m.bindTooltip(s.name + (s.presale_units || s.bd_units ? ' · ' + fmtUnits(s.presale_units || s.bd_units) + ' 伙' : ''), { direction: 'top', offset: [0, -4] });
+      var tip = s.name + (s.presale_units || s.bd_units ? ' · ' + fmtUnits(s.presale_units || s.bd_units) + ' 伙' : '');
+      if (s.sale && s.sale.remaining > 0) tip += ' · 余 ' + fmtUnits(s.sale.remaining);
+      m.bindTooltip(tip, { direction: 'top', offset: [0, -4] });
       layer.addLayer(m);
     });
     var parts = [];
-    ['已预售', '动工未预售', '批地未动工', '已预售·已入伙', '已入伙·未预售'].forEach(function (k) {
+    STATUS_ORDER.forEach(function (k) {
       if (!cnt[k]) return;
       parts.push(k + ' ' + cnt[k] + ' 个' + (units[k] ? '（' + fmtUnits(units[k]) + ' 伙）' : ''));
     });
@@ -220,18 +235,30 @@ MAP_JS = r"""
   }
 
   function init() {
-    map = L.map('map', { center: [22.36, 114.13], zoom: 11, preferCanvas: true, zoomControl: true });
+    map = L.map('map', { center: [22.36, 114.13], zoom: 11, preferCanvas: true });
     var attrGov = '地圖資料 &copy; <a href="https://www.landsd.gov.hk" target="_blank" rel="noopener">地政總署</a> / CSDI';
-    var gov = L.tileLayer('https://mapapi.geodata.gov.hk/gs/api/v1.0.0/xyz/basemap/WGS84/{z}/{x}/{y}.png', { maxZoom: 19, attribution: attrGov });
-    var govLabel = L.tileLayer('https://mapapi.geodata.gov.hk/gs/api/v1.0.0/xyz/label/hk/tc/WGS84/{z}/{x}/{y}.png', { maxZoom: 19, pane: 'shadowPane' });
-    var imagery = L.tileLayer('https://mapapi.geodata.gov.hk/gs/api/v1.0.0/xyz/imagery/WGS84/{z}/{x}/{y}.png', { maxZoom: 19, attribution: attrGov });
+    var GOV = 'https://mapapi.geodata.gov.hk/gs/api/v1.0.0/xyz/';
+    var gov = L.tileLayer(GOV + 'basemap/WGS84/{z}/{x}/{y}.png', { maxZoom: 19, attribution: attrGov });
+    var govLabel = L.tileLayer(GOV + 'label/hk/tc/WGS84/{z}/{x}/{y}.png', { maxZoom: 19, pane: 'shadowPane' });
+    var imagery = L.tileLayer(GOV + 'imagery/WGS84/{z}/{x}/{y}.png', { maxZoom: 19, attribution: attrGov });
     var osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' });
-    var base = L.layerGroup([gov, govLabel]).addTo(map);
+    var base = L.layerGroup([gov, govLabel]);
     var sat = L.layerGroup([imagery, govLabel]);
-    L.control.layers({ '政府地图': base, '卫星图': sat, 'OpenStreetMap': osm }, null, { position: 'topright' }).addTo(map);
-    // 政府瓦片挂了就换 OSM
-    var failed = 0;
-    gov.on('tileerror', function () { if (++failed === 6) { map.removeLayer(base); osm.addTo(map); } });
+    // 先探一张政府瓦片：通就默认政府地图并提供卫星图；不通（内地代理常挡 gov.hk）只给 OSM，
+    // 免得切到政府地图对着灰底
+    var probe = new Image(), decided = false;
+    function useGov() {
+      if (decided) return; decided = true;
+      base.addTo(map);
+      L.control.layers({ '政府地图': base, '卫星图': sat, 'OpenStreetMap': osm }, null, { position: 'topright' }).addTo(map);
+    }
+    function useOsm() {
+      if (decided) return; decided = true;
+      osm.addTo(map);
+    }
+    probe.onload = useGov; probe.onerror = useOsm;
+    setTimeout(useOsm, 4000);
+    probe.src = GOV + 'basemap/WGS84/11/1673/893.png';
 
     layer = L.layerGroup().addTo(map);
 
@@ -241,7 +268,8 @@ MAP_JS = r"""
       d.innerHTML = SRC_ORDER.filter(function (k) { return k !== '未知'; }).map(function (k) {
         return '<div><i style="background:' + SRC_COLOR[k] + '"></i>' + k + '</div>';
       }).join('') +
-        '<div class="st"><i style="background:#334155"></i>实心 已预售 &nbsp; <i style="border:2px dashed #334155;background:#33415588"></i>虚边 动工未预售 &nbsp; <i style="border:2px solid #334155"></i>空心 批地未动工</div>';
+        '<div class="st"><i style="background:#334155"></i>实心 在售 &nbsp; <i style="background:#334155;border:2px solid #111"></i>黑边 已批预售未开售<br>' +
+        '<i style="border:2px dashed #334155;background:#33415588"></i>虚边 动工未预售 &nbsp; <i style="border:2px solid #334155"></i>空心 批地未动工</div>';
       return d;
     };
     legend.addTo(map);
@@ -259,19 +287,24 @@ MAP_JS = r"""
       })
       .catch(function (e) { note('地图数据 land_chain.json 加载失败：' + e.message); });
 
-    sec.querySelectorAll('input[data-stage], #map-src, #map-min').forEach(function (el) { el.addEventListener('change', render); });
+    sec.querySelectorAll('input[data-status], #map-src, #map-min').forEach(function (el) { el.addEventListener('change', render); });
     var t;
     document.getElementById('map-q').addEventListener('input', function () { clearTimeout(t); t = setTimeout(render, 250); });
-    var wrap = document.getElementById('map-wrap');
-    document.getElementById('map-full').addEventListener('click', function () {
-      wrap.classList.toggle('full');
-      this.textContent = wrap.classList.contains('full') ? '✕ 退出全屏' : '⛶ 全屏';
-      setTimeout(function () { map.invalidateSize(); }, 60);
-    });
-    document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && wrap.classList.contains('full')) document.getElementById('map-full').click();
-    });
   }
 })();
 </script>
 """
+
+
+def build_map_page(last_update: str) -> str:
+    """整页 map.html。"""
+    return (
+        "<!DOCTYPE html>\n<html lang=\"zh-HK\">\n<head>\n"
+        "<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        "<title>项目地图 · 香港一手住宅行情看板</title>\n"
+        "<link rel=\"manifest\" href=\"manifest.json\">\n"
+        "<link rel=\"icon\" type=\"image/png\" sizes=\"192x192\" href=\"assets/pwa/icon-192.png\">\n"
+        "<style>" + MAP_CSS + "</style>\n</head>\n<body>\n"
+        + MAP_HTML.replace("__LAST_UPDATE__", last_update)
+        + MAP_JS + "\n</body>\n</html>\n"
+    )

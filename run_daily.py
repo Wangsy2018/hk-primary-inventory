@@ -92,7 +92,8 @@ def _refresh_land_chain() -> None:
     out = OUT_DIR / "land_chain.json"
     try:
         subprocess.run(
-            [sys.executable, str(LAND_CHAIN_SCRIPT), "--out", str(out)],
+            [sys.executable, str(LAND_CHAIN_SCRIPT), "--out", str(out),
+             "--house730", str(OUT_DIR / "projects_inventory.csv")],
             check=True, cwd=str(PROJECT_DIR),
         )
         new = json.loads(out.read_text(encoding="utf-8"))

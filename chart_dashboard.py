@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from map_section import MAP_CSS, MAP_HTML, MAP_JS
+from map_section import build_map_page
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT_DIR = PROJECT_DIR / "out_inventory"
@@ -418,13 +418,16 @@ def build_dashboard_html(dirpath: Path) -> str:
   .bar > i {{ position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: #1f6feb; }}
   .pctnum {{ min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }}
   @media (max-width: 800px) {{ .kpis {{ grid-template-columns: repeat(2, 1fr); }} }}
-{MAP_CSS}
+  .tabs {{ display: flex; gap: 4px; margin-top: 12px; margin-bottom: -20px; }}
+  .tabs a {{ color: #cfe0ff; text-decoration: none; font-size: 13px; padding: 7px 14px; border-radius: 8px 8px 0 0; background: rgba(255,255,255,.08); }}
+  .tabs a.on {{ background: #f4f6f9; color: #1f3a5f; font-weight: 700; }}
 </style>
 </head>
 <body>
   <div class="header">
     <h1>🏙️ 香港一手住宅行情看板</h1>
-    <div class="sub">数据来源：土地注册处 · 地政总署 / CSDI · house730 · 中原地产 · 锚点回推 · 数据截至 {data['kpi']['effective_month']} · 更新时间 {data['kpi']['last_update']} · <a href="#map-sec" style="color:#cfe0ff">🗺 项目地图</a></div>
+    <div class="sub">数据来源：土地注册处 · 地政总署 / CSDI · house730 · 中原地产 · 锚点回推 · 数据截至 {data['kpi']['effective_month']} · 更新时间 {data['kpi']['last_update']}</div>
+    <div class="tabs"><a class="on" href="./">📊 行情看板</a><a href="map.html">🗺️ 项目地图</a></div>
   </div>
 
   <div class="container">
@@ -487,7 +490,6 @@ def build_dashboard_html(dirpath: Path) -> str:
       <h2>中原城市领先指数 CCL 与二手成交（上下分区共用横轴 · CCL 自 1994 年、二手成交自 2002 年，默认近 3 年，可拖到最早）</h2>
       <div id="chart-second" class="chart"></div>
     </div>
-{MAP_HTML}
   </div>
 
   <div class="ov" id="ov">
@@ -939,7 +941,6 @@ def build_dashboard_html(dirpath: Path) -> str:
     }}
   }});
 </script>
-{MAP_JS}
 </body>
 </html>
 """
@@ -961,6 +962,12 @@ def generate(out_dir: Path) -> Path:
     target = out_dir / "dashboard.html"
     target.write_text(html, encoding="utf-8")
     print(f"[看板] 已生成: {target}")
+
+    # 项目地图独立一页，数据是 land_chain.json（没有也照样出页，页上会提示）
+    from datetime import datetime, timedelta, timezone
+    hkt = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M HKT")
+    (out_dir / "map.html").write_text(build_map_page(hkt), encoding="utf-8")
+    print("[看板] 已生成: map.html")
 
     _write_pwa_files(out_dir)
     return target

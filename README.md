@@ -159,8 +159,8 @@ python chart_dashboard.py
 | `一手短期库存.py` | 主程序：抓四个数据源 + 锚点回推，输出 CSV/Excel |
 | `house730_inventory.py` | 抓 house730 逐盘在售货量，输出 `projects_inventory.csv` |
 | `chart_dashboard.py` | 生成交互式 HTML 看板（ECharts），本地 / GitHub Pages 共用；**唯一的图表产物** |
-| `map_section.py` | 看板底部的「项目地图」块（Leaflet + 政府地图瓦片，挡了自动换 OpenStreetMap） |
-| `land_chain.py` | 项目地图数据：抓 CSDI 八个图层（预售、卖地、换地、契约修订、屋宇署批则/动工/OP），按坐标 + 地段号串成「地→楼→售」链，输出 `land_chain.json` |
+| `map_section.py` | 「项目地图」独立页 `map.html`（Leaflet + 政府地图瓦片，探测不通自动只用 OpenStreetMap），按销售状态 / 土地来源 / 规模筛选 |
+| `land_chain.py` | 项目地图数据：抓 CSDI 八个图层（预售、卖地、换地、契约修订、屋宇署批则/动工/OP），按坐标 + 地段号串成「地→楼→售」链，再接 house730 余货定在售 / 售罄，输出 `land_chain.json` |
 | `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
 | `notify_utils.py` | 数据 diff 与 SMTP 发信 |
 | `data/baseline/` | 上次确认的数据快照（提交到 Git），用于判断「是否有更新」 |

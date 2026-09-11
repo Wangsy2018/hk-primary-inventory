@@ -111,7 +111,8 @@ jobs:
           # 否则它的作用域覆盖不到整个站点
           cp out_inventory/manifest.json pages_build/manifest.json
           cp out_inventory/sw.js pages_build/sw.js
-          # 项目地图的数据（缺了地图块会提示，不影响其他图表）
+          # 项目地图页 + 数据（数据缺了页面会提示，不影响看板）
+          cp out_inventory/map.html pages_build/map.html
           if [ -f out_inventory/land_chain.json ]; then
             cp out_inventory/land_chain.json pages_build/land_chain.json
           fi

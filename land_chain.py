@@ -375,7 +375,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
         "vendor": lambda d: d.vendor.iloc[-1],
         "owner": lambda d: next(o for o in ("港铁", "市建局", "房協", "房委会", "愉景湾", "私人") if o in set(d.owner)),
         "ap": lambda d: d.ap.iloc[-1],
-        "phases": lambda d: [{"name": r.name_zh or r.name_en, "ym": r.ym, "units": int(r.units)}
+        "phases": lambda d: [{"name": r.name_zh or r.name_en, "name_en": r.name_en, "ym": r.ym, "units": int(r.units)}
                              for r in d.sort_values("ym").itertuples()],
     })
     BD = agg_sites(b_start, {
@@ -507,7 +507,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             "id": f"p{i}", "lat": round(float(p.lat), 6), "lon": round(float(p.lon), 6),
             "stage": "已预售·已入伙" if op_done else "已预售",
             "name": zh or en or re.sub(r"[（(][^)）]*[)）]", "", str(p.address_zh or p.address)).strip(), "name_en": en, "phases": p.phases,
-            "address": p.address_zh or p.address, "owner": p.owner, "vendor": p.vendor,
+            "address": p.address_zh or p.address, "address_en": p.address, "owner": p.owner, "vendor": p.vendor,
             "source": source_of(p.owner, recs), "land": recs,
             "presale_units": int(p.units), "presale_first": p.first_ym, "presale_last": p.last_ym,
             "plan_ym": b["plan_ym"] if b else "", "start_ym": b["first_ym"] if b else "",
@@ -577,6 +577,99 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
 
 
 # ----------------------------------------------------------------------------
+# 销售状态：接 house730 逐盘余货（英文名 / 门牌号+街名两条路对）
+# ----------------------------------------------------------------------------
+_STREET = re.compile(r"(?:NO\.?\s*)?(\d+[A-Z]?)\s+([A-Z'’ ]+?\s(?:ROAD|STREET|LANE|AVENUE|PATH|TERRACE|DRIVE|WAY|CIRCUIT|CRESCENT|SQUARE|VILLAS?|GARDENS?|PLACE|HILL|BAY))\b")
+
+
+def addr_key(text) -> str:
+    t = str(text or "").upper().replace(",", " ")
+    t = re.sub(r"\bRD\b\.?", "ROAD", t); t = re.sub(r"\bST\b\.?", "STREET", t); t = re.sub(r"\bAVE\b\.?", "AVENUE", t)
+    m = _STREET.search(t)
+    return f"{m.group(1)} {re.sub(r'[^A-Z ]', '', m.group(2)).strip()}" if m else ""
+
+
+def name_key(text) -> str:
+    """'LA MIRABELLE Phase II' / 'Phase XIIIB of LOHAS Park – LA MIRABELLE' 的每一段 -> 'LAMIRABELLE'。"""
+    t = str(text or "").upper()
+    t = re.sub(r"\bPHASE\s*[\w-]+\b|\bSERIES\b|\bDEVELOPMENT\b|\bPENDING\b|\bTOWERS?\b", " ", t)
+    t = re.sub(r"\b(I{1,3}|IV|VI{0,3}|IX|X{1,3}|[0-9]+[A-Z]?)\b$", " ", t.strip())
+    return re.sub(r"[^A-Z]", "", t)
+
+
+def name_keys(text) -> set:
+    parts = re.split(r"\s*[-–—:]\s*|\(|\)", str(text or ""))
+    return {k for k in (name_key(x) for x in parts) if len(k) >= 4}
+
+
+def attach_sales(sites: list[dict], house730_csv: Path | None) -> None:
+    h = None
+    if house730_csv and Path(house730_csv).exists():
+        try:
+            h = pd.read_csv(house730_csv)
+        except Exception as e:      # noqa: BLE001
+            print(f"  [land_chain] house730 表读取失败，销售状态按无余货数据处理: {e}")
+    by_name: dict[str, set] = {}
+    by_addr: dict[str, set] = {}
+    if h is not None:
+        for i, r in h.iterrows():
+            for nm in str(r.get("phase_names") or "").split("|") + [str(r.get("project") or "")]:
+                for k in name_keys(nm):
+                    by_name.setdefault(k, set()).add(i)
+            ak = addr_key(r.get("address"))
+            if ak:
+                by_addr.setdefault(ak, set()).add(i)
+    used = set()
+    for s in sites:
+        s["sale"] = None
+        if not s["stage"].startswith("已预售"):
+            continue
+        hits = set()
+        for ph in s.get("phases", []):
+            for k in name_keys(ph.get("name_en") or ""):
+                hits |= by_name.get(k, set())
+        for k in name_keys(s.get("name_en")):
+            hits |= by_name.get(k, set())
+        ak = addr_key(s.get("address_en"))
+        if ak:
+            hits |= by_addr.get(ak, set())
+        if hits:
+            sub = h.loc[sorted(hits)]
+            used |= hits
+            s["sale"] = {
+                "projects": [str(x) for x in sub.project],
+                "total": int(pd.to_numeric(sub.total_units, errors="coerce").fillna(0).sum()),
+                "sold": int(pd.to_numeric(sub.sold_units, errors="coerce").fillna(0).sum()),
+                "remaining": int(pd.to_numeric(sub.remaining_units, errors="coerce").fillna(0).sum()),
+                "first_sales": str(sub.first_sales_date.min()) if "first_sales_date" in sub else "",
+            }
+    # 销售状态
+    recent = (pd.Timestamp.now(tz=HKT) - pd.DateOffset(months=24)).strftime("%Y-%m")
+    for s in sites:
+        st = s["stage"]
+        if st == "动工未预售":
+            s["status"] = "已动工·未预售"
+        elif st == "批地未动工":
+            s["status"] = "已批地·未动工"
+        elif st == "已入伙·未预售":
+            s["status"] = "已入伙·未预售"
+        elif s["sale"] and s["sale"]["remaining"] > 0:
+            s["status"] = "在售"
+        elif s["sale"]:
+            s["status"] = "已售罄·已入伙"
+        elif h is None and st == "已预售":
+            s["status"] = "已批预售"
+        elif st == "已预售" and s["presale_first"] >= recent:
+            s["status"] = "已批预售·未开售"
+        else:
+            s["status"] = "已售罄·已入伙"
+    if h is not None:
+        miss = h.loc[[i for i in range(len(h)) if i not in used]]
+        print(f"  [land_chain] house730 {len(h)} 个在售项目，{len(used)} 个接到地盘；未接上: "
+              + "; ".join(str(x) for x in miss.project.head(12)) + (" …" if len(miss) > 12 else ""))
+
+
+# ----------------------------------------------------------------------------
 def write_json(data: dict, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     # allow_nan=False：漏网的 NaN 会让浏览器整份 JSON 解析失败，宁可在这里炸
@@ -592,6 +685,8 @@ def same_content(a: dict, b: dict) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description="项目地图数据（CSDI 官方记录串链）")
     ap.add_argument("--out", type=str, default="out_inventory/land_chain.json")
+    ap.add_argument("--house730", type=str, default="out_inventory/projects_inventory.csv",
+                    help="house730 逐盘在售表，用来标在售 / 售罄")
     ap.add_argument("--raw-cache", type=str, default="", help="调试用：把抓下来的原始表存/读这个目录")
     args = ap.parse_args()
 
@@ -608,12 +703,18 @@ def main() -> int:
                 df.to_pickle(cache / f"{k}.pkl")
 
     data = build(raw)
+    attach_sales(data["sites"], Path(args.house730) if args.house730 else None)
+    st = Counter(); su = Counter()
+    for x in data["sites"]:
+        st[x["status"]] += 1
+        su[x["status"]] += x["presale_units"] or x["bd_units"] or 0
+    data["summary"]["by_status"] = [{"status": k, "sites": st[k], "units": su[k]} for k in st]
     out = Path(args.out)
     write_json(data, out)
     s = data["summary"]
     print(f"  [land_chain] 地盘 {len(data['sites'])} 个 -> {out}")
-    for r in s["by_stage"]:
-        print(f"    {r['stage']:<10} {r['sites']:>5} 个  {r['units']:>8,} 伙")
+    for r in s["by_status"]:
+        print(f"    {r['status']:<10} {r['sites']:>5} 个  {r['units']:>8,} 伙")
     return 0
 
 
