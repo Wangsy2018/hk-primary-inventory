@@ -107,26 +107,50 @@ def haversine(lat1, lon1, lat2, lon2):
     return 2 * R * np.arcsin(np.sqrt(a))
 
 
-_LOT_SKIP = {"AND", "THE", "EXTENSION", "TO", "EXTENSIONS", "THERETO", "OF"}
+_LOT_SKIP = {"AND", "THE", "EXTENSION", "TO", "EXTENSIONS", "THERETO", "OF", "NOS", "NO",
+             "REMAINING", "PORTION", "SECTION", "SUBSECTION", "SEC", "SS", "RP", "EXT"}
+# 官方短码（预售同意书 / 卖地记录里的写法）；地址里的全名取词时从后往前凑，凑出表里的才算
+_LOT_ABBR = {"IL", "ML", "KIL", "NKIL", "KML", "NKML", "RBL", "STTL", "TMTL", "TPTL", "FSSTL", "KTIL", "AIL", "AML",
+             "TKOTL", "KCTL", "YLTL", "TWTL", "TWIL", "TYTL", "HHIL", "HHML", "SKWIL", "ALCIL", "CWIL", "CWML", "TCTL",
+             "SIL", "SCIL", "SBIL", "SBML", "YTIL", "YTML", "TSWTL", "QBML", "QBIL", "JBTL", "TLTL", "CPTL", "MWL",
+             "THL", "SL", "SAIL", "SAML", "SOIL", "SHIL", "SLIL", "SDIL", "SFIL", "SGIL", "SUIL", "SEIL", "SKIL",
+             "SSIL", "SMIL", "PSIL", "HSKTL", "CKWL", "CLKL", "GL", "LL", "KCL", "WL", "MTRL", "SCSL"}
+_LOT_ALIAS = {"APLIL": "ALCIL", "APIL": "ALCIL", "ALIL": "ALCIL", "SKWIL": "SIL"}   # 筲箕湾官方写 S.I.L.
+# 地址里地段前缀之前常常还有街名、岛名、区名，遇到这些词就从它后面开始取
+_LOT_CUT = re.compile(r"\b(?:STREET|ROAD|LANE|AVENUE|PATH|TERRACE|DRIVE|CIRCUIT|SQUARE|PLAZA|ISLAND|AREA|ESTATE|VILLAGE|"
+                      r"SITE|PHASE|SECTION|JUNCTION|CORNER|OFF|AT|IN|ON|OPPOSITE|NEAR|LOTS?|R\.?P\.?|EXT|EXTS)\b|[\d,;:()&/]")
 
 
 def canon_lots(text) -> frozenset:
     """各库写法不同的地段号统一成短码：
-    'Kowloon Inland Lot No. 10557' / 'KIL 10557' -> 'KIL 10557'
-    'Lot No. 313 in Demarcation District No. 355' / 'Lot 313 RP in DD 355' -> 'DD355 LOT 313'
+    'Kowloon Inland Lot No. 10557' / 'KIL 10557' / 'N.K.I.L. 6584' -> 'KIL 10557' / 'NKIL 6584'
+    '6 Ying Hong Street Lantau Island Tung Chung Town Lot No. 36' -> 'TCTL 36'
+    'Lot No. 313 in Demarcation District No. 355' / 'D.D. 92 Lot 2640' -> 'DD355 LOT 313' / 'DD92 LOT 2640'
     """
     t = re.sub(r"<br\s*/?>", " ", str(text or "")).upper()
     t = re.sub(r"\b((?:[A-Z]\.){2,})", lambda m: m.group(1).replace(".", ""), t)   # T.K.O.T.L. -> TKOTL
     out = set()
-    for m in re.finditer(r"([A-Z][A-Z ]*?)\s+LOT\s+NO\.?\s*(\d+)", t):
-        words = [w for w in m.group(1).split() if w not in _LOT_SKIP]
-        if words:
-            out.add("".join(w[0] for w in words) + "L " + m.group(2))
-    for m in re.finditer(
-            r"LOT\s+(?:NO\.?\s*)?(\d+)\b[^,;]{0,40}?\bIN\s+(?:DEMARCATION\s+DISTRICT|D\.?D\.?)\s*(?:NO\.?)?\s*(\d+)", t):
-        out.add(f"DD{m.group(2)} LOT {m.group(1)}")
+    # 丈量约份地段，两种语序都有；认出来后从文本里抹掉，免得被下面的规则误读
+    dd = (r"LOT\s+(?:NO\.?\s*)?(\d+)\b[^,;]{0,40}?\bIN\s+(?:DEMARCATION\s+DISTRICT|DD)\s*(?:NO\.?)?\s*(\d+)",
+          r"(?:DEMARCATION\s+DISTRICT|DD)\s*(?:NO\.?)?\s*(\d+)\s+LOT\s+(?:NO\.?\s*)?(\d+)\b")
+    for pat, order in ((dd[0], (1, 2)), (dd[1], (2, 1))):
+        for m in re.finditer(pat, t):
+            out.add(f"DD{m.group(order[1])} LOT {m.group(order[0])}")
+        t = re.sub(pat, " ", t)
+    for m in re.finditer(r"([A-Z][A-Z .]*?)\s+LOT\s+NO\.?\s*(\d+)", t):
+        prefix = _LOT_CUT.split(m.group(1))[-1]
+        words = [w for w in prefix.replace(".", "").split() if w not in _LOT_SKIP and (len(w) > 1 or w == "O")]
+        abbr = ""
+        for k in range(1, min(5, len(words)) + 1):        # 取最长的、在官方表里的前缀
+            cand = "".join(w[0] for w in words[-k:]) + "L"
+            if _LOT_ALIAS.get(cand, cand) in _LOT_ABBR:
+                abbr = _LOT_ALIAS.get(cand, cand)
+        if not abbr and words:
+            abbr = "".join(w[0] for w in words[-4:]) + "L"
+        if abbr:
+            out.add(f"{abbr} {m.group(2)}")
     for m in re.finditer(r"\b([A-Z]{2,6}L)\s+(\d{2,5})\b", t):
-        out.add(f"{m.group(1)} {m.group(2)}")
+        out.add(f"{_LOT_ALIAS.get(m.group(1), m.group(1))} {m.group(2)}")
     return frozenset(out)
 
 
@@ -473,9 +497,12 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     land["cos"] = land.party.map(company_keys)
     PS["land_idx"] = attach_land(PS)
     BD["land_idx"] = attach_land(BD, use_company=True)
-    # 动工必须晚于批地，否则是旧楼的记录
-    BD["land_idx"] = [[(k, how) for k, how in ix if pd.isna(land.date[k]) or land.date[k].strftime("%Y-%m") <= BD.last_ym[j]]
-                      for j, ix in enumerate(BD.land_idx)]
+    # 批地必须早于动工 / 预售，否则接到的是同址旧楼或隔壁盘；地段号对上的例外（同一地段转手再发展）
+    def _in_time(ix, limit_ym):
+        return [(k, how) for k, how in ix
+                if how == "地段号" or pd.isna(land.date[k]) or land.date[k].strftime("%Y-%m") <= limit_ym]
+    BD["land_idx"] = [_in_time(ix, BD.first_ym[j]) for j, ix in enumerate(BD.land_idx)]
+    PS["land_idx"] = [_in_time(ix, PS.first_ym[i]) for i, ix in enumerate(PS.land_idx)]
     PS["land_how"] = [dict(ix) for ix in PS.land_idx]
     BD["land_how"] = [dict(ix) for ix in BD.land_idx]
     PS["land_idx"] = [[k for k, _ in ix] for ix in PS.land_idx]
@@ -574,8 +601,10 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     used_land: set[int] = set()
     for i, p in PS.iterrows():
         how = dict(p.land_how)
-        for j in p.bd:                      # 动工地盘按坐标 / 公司接到的土地记录也算这个盘的
+        for j in p.bd:                      # 动工地盘按坐标 / 公司接到的土地记录也算这个盘的，但地段号明显不同的不要
             for k, h in BD.land_how[j].items():
+                if p.lots and land.lots[k] and not (p.lots & land.lots[k]):
+                    continue
                 how.setdefault(k, h)
         idx = list(p.land_idx) + [k for k in how if k not in p.land_idx]
         used_land.update(idx)
