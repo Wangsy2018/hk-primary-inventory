@@ -39,8 +39,11 @@ LAYERS = {
     "bd_op":    "common/bd_rcd_1629267205236_397",        # BDMD56 已发佔用许可证
 }
 
-PRESALE_FROM_YEAR = 2012      # 屋宇署月报 2011-06 起才有，早于此的预售没链可串
-LAND_FROM_YEAR = 2011
+# 只看 2010 年起的卖地 / 换地 / 契约修订 / 批则 / 预售；更早的不进（屋宇署月报 2011-06 起才有）
+FROM_YEAR = 2010
+PRESALE_FROM_YEAR = FROM_YEAR
+LAND_FROM_YEAR = FROM_YEAR
+LAND_LOOKBACK_YEARS = 15      # 土地记录早于项目动工 / 预售超过这个年数，就不算这个项目的来源
 
 HKT = timezone(timedelta(hours=8))
 
@@ -164,6 +167,18 @@ def norm_co(s) -> str:
     s = re.sub(r"\b(limited|ltd|company|co|holdings?|development|developments|investments?)\b", "",
                str(s or "").lower())
     return re.sub(r"[^a-z0-9]", "", s)
+
+
+# 只关心私人住宅：房協 / 房委会 / 政府的资助出售、公屋、简约公屋、过渡性房屋一律不要
+NON_PRIVATE_OWNER = ("房協", "房委会")
+_NON_PRIVATE_PARTY = re.compile(r"HOUSING SOCIETY|HOUSING AUTHORITY|HOUSING DEPARTMENT|ARCHITECTURAL SERVICES|"
+                                r"URBAN RENEWAL AUTHORITY.*SUBSIDI|HONG KONG SETTLERS", re.I)
+_NON_PRIVATE_TYPE = re.compile(r"Public rental|Public housing|Light public|Transitional|Subsidi[sz]ed|Home ownership|"
+                               r"Green form|Starter home|Elderly hous|Residential care|Hostel|Dormitor|Staff quarter|Government quarter|Departmental quarter|Married quarter", re.I)
+
+
+def is_public(party: str = "", btype: str = "") -> bool:
+    return bool(_NON_PRIVATE_PARTY.search(str(party or ""))) or bool(_NON_PRIVATE_TYPE.search(str(btype or "")))
 
 
 def company_keys(text) -> frozenset:
@@ -305,12 +320,13 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     ps["units"] = to_num(ps.units).fillna(0)
     ps["ym"] = ym(ps)
     ps["yr"] = pd.to_numeric(ps.SEARCH01_EN, errors="coerce")
+    ps["owner"] = ps.vendor.map(owner_of)
     ps = clean_xy(ps)
     ps = ps[(ps.yr >= PRESALE_FROM_YEAR) & (ps.units > 0) & (ps.lat.notna() | (ps.lot.map(canon_lots).map(len) > 0))]
+    ps = ps[~ps.owner.isin(NON_PRIVATE_OWNER) & ~ps.vendor.map(is_public)]
     ps = ps.reset_index(drop=True)
     ps["lots"] = ps.lot.map(canon_lots)
     ps["ap_n"] = ps.ap.map(norm_ap)
-    ps["owner"] = ps.vendor.map(owner_of)
     # 同一地段号，或 30 米内同一认可人士 -> 同一地盘（同一屋苑的各期）
     lots, aps = ps.lots.values, ps.ap_n.values
     ps["site"] = cluster(ps, 30, lambda i, j: bool(lots[i] & lots[j]) or len(aps[i] & aps[j]) >= 2)
@@ -339,8 +355,8 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
         return df
     b_start = pd.concat([_bd_works(raw["bd_start"], "5.4"), _bd_works(raw["bd_notify"], "5.5")], ignore_index=True)
     b_start = clean_xy(b_start)
-    # 过渡性房屋不是私人住宅供应
-    b_start = b_start[~b_start.btype.str.contains("Transitional", case=False)]
+    # 只要私人住宅：过渡性房屋、简约公屋、公屋、资助出售、宿舍这些不要，房協 / 房委会 / 建筑署申请的也不要
+    b_start = b_start[~b_start.btype.map(lambda x: is_public("", x)) & ~b_start.applicant.map(lambda x: is_public(x, ""))]
     b_start["lots"] = b_start.address.map(canon_lots)
     res_like = b_start.btype.str.contains(r"Apartment|Residential|House|Domestic|Villa|Flat|Composite", case=False, regex=True)
     b_start = b_start[b_start.lat.notna() & ((b_start.units > 0) | res_like)].reset_index(drop=True)
@@ -365,6 +381,8 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     b_plan["dom_gfa"] = to_num(b_plan.dom_gfa).fillna(0)
     b_plan["ym"] = ym(b_plan)
     b_plan = clean_xy(b_plan)
+    b_plan = b_plan[b_plan.ym >= f"{FROM_YEAR}-01"]
+    b_plan = b_plan[~b_plan["NSEARCH07_EN"].fillna("").map(lambda x: is_public(x, ""))]
     b_plan["lots"] = b_plan.address.fillna("").map(canon_lots)
     b_plan = b_plan[b_plan.lat.notna()].reset_index(drop=True)
     b_plan["ap_n"] = b_plan.ap.map(norm_ap)
@@ -374,6 +392,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     b_op["units"] = to_num(b_op.units).fillna(0)
     b_op["ym"] = ym(b_op)
     b_op = clean_xy(b_op)
+    b_op = b_op[~b_op["NSEARCH12_EN"].fillna("").map(lambda x: is_public(x, "")) & ~b_op["NSEARCH04_EN"].fillna("").map(lambda x: is_public("", x))]
     b_op["lots"] = b_op.address.fillna("").map(canon_lots)
     b_op = b_op[(b_op.units > 0) & b_op.lat.notna()].reset_index(drop=True)
     b_op["ap_n"] = b_op.ap.map(norm_ap)
@@ -409,6 +428,8 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     land["date"] = pd.to_datetime(land.date.astype(str).str.replace(r"<br\s*/?>.*", "", regex=True),
                                   errors="coerce", format="mixed")
     land = clean_xy(land)
+    land = land[land.date.dt.year >= LAND_FROM_YEAR]
+    land = land[~land.party.fillna("").map(lambda x: is_public(x, "")) & ~land.use.fillna("").str.contains("Private Sector Participation|Subsidi", case=False, regex=True)]
     land["lots"] = land.lot.map(canon_lots)
     land = land[land.lat.notna() | (land.lots.map(len) > 0)].reset_index(drop=True)
     land["area"] = to_num(land.area) if "area" in land else np.nan
@@ -499,8 +520,20 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     BD["land_idx"] = attach_land(BD, use_company=True)
     # 批地必须早于动工 / 预售，否则接到的是同址旧楼或隔壁盘；地段号对上的例外（同一地段转手再发展）
     def _in_time(ix, limit_ym):
-        return [(k, how) for k, how in ix
-                if how == "地段号" or pd.isna(land.date[k]) or land.date[k].strftime("%Y-%m") <= limit_ym]
+        # 也不能太早：几十年前卖过的地，现在的项目是收购旧楼重建，那笔卖地不是它的来源
+        floor_ym = f"{int(limit_ym[:4]) - LAND_LOOKBACK_YEARS}-01"
+        out = []
+        for k, how in ix:
+            d = land.date[k]
+            if pd.isna(d):
+                out.append((k, how))
+                continue
+            dy = d.strftime("%Y-%m")
+            if dy < floor_ym:
+                continue
+            if how == "地段号" or dy <= limit_ym:
+                out.append((k, how))
+        return out
     BD["land_idx"] = [_in_time(ix, BD.first_ym[j]) for j, ix in enumerate(BD.land_idx)]
     PS["land_idx"] = [_in_time(ix, PS.first_ym[i]) for i, ix in enumerate(PS.land_idx)]
     PS["land_how"] = [dict(ix) for ix in PS.land_idx]
@@ -586,7 +619,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
         kinds = {r["kind"].split("(")[0] for r in recs}
         if owner == "港铁":
             return "港铁上盖"
-        if owner in ("市建局", "房協", "房委会", "愉景湾"):
+        if owner in ("市建局", "愉景湾"):
             return owner
         if "卖地" in kinds:
             return "公开卖地"
@@ -682,6 +715,41 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             "ap": "", "applicant": "",
         })
 
+    # ---------- 可疑匹配先摘出来 ----------
+    # 坐标接上但买家 ≠ 屋宇署申请人、批则 / 动工 / 预售早于批地、预售伙数和屋宇署伙数差一倍以上：
+    # 这些先不进记录，单独放在 review 里，核实了再放回
+    review = []
+    for st in sites:
+        if st["stage"] == "批地未动工":
+            continue
+        keep = []
+        for rec in st["land"]:
+            probs = []
+            ym0 = rec["date"][:7]
+            if not rec["kind"].startswith("卖地"):      # 契约修订 / 换地在批则之后签是正常流程，不查
+                keep.append(rec)
+                continue
+            if rec["basis"] != "地段号":
+                for key, label in (("start_ym", "动工"), ("plan_ym", "批则"), ("presale_first", "预售")):
+                    if st.get(key) and ym0 and st[key] < ym0:
+                        probs.append(f"{label} {st[key]} 早于批地")
+                if rec["basis"] == "坐标" and st.get("applicant") and rec["party"] \
+                        and company_sim(company_keys(rec["party"]), company_keys(st["applicant"])) < 0.85:
+                    probs.append("买家≠屋宇署申请人")
+                if rec["basis"] == "公司名":
+                    probs.append("只靠公司名对上")
+            if st.get("bd_units") and st.get("presale_units"):
+                ratio = st["presale_units"] / st["bd_units"]
+                if ratio > 1.3 or ratio < 0.5:
+                    probs.append(f"预售 {st['presale_units']} 伙 vs 屋宇署 {st['bd_units']} 伙")
+            if probs:
+                review.append({**rec, "site": st["name"], "site_id": st["id"], "problems": probs})
+            else:
+                keep.append(rec)
+        if len(keep) != len(st["land"]):
+            st["land"] = keep
+            st["source"] = source_of(st["owner"], keep)
+
     # 汇总
     by_src = Counter()
     by_src_units = Counter()
@@ -707,6 +775,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
                          for k in ("已预售", "已预售·已入伙", "动工未预售", "已入伙·未预售", "批地未动工")],
         },
         "sites": sites,
+        "review": review,
     }
 
 
