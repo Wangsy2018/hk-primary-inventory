@@ -3,3 +3,4 @@ __pycache__/
 out_inventory/
 .baseline_updated
 .env
+srpe_data/

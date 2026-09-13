@@ -161,9 +161,11 @@ python chart_dashboard.py
 | `chart_dashboard.py` | 生成交互式 HTML 看板（ECharts），本地 / GitHub Pages 共用；**唯一的图表产物** |
 | `map_section.py` | 「项目地图」独立页 `map.html`（Leaflet + 政府地图瓦片，探测不通自动只用 OpenStreetMap），按销售状态 / 土地来源 / 规模筛选 |
 | `land_chain.py` | 项目地图数据：抓 CSDI 九个图层（预售、卖地、换地、契约修订、地段扩展、屋宇署批则/动工同意/上盖动工通知/OP），按坐标 + 地段号串成「地→楼→售」链，再接 house730 余货定在售 / 售罄，输出 `land_chain.json`。只看 2010 年起、只看私人住宅（房協 / 房委会 / 资助 / 简约 / 过渡房屋全剔）；买家与申请人对不上等可疑匹配放 `review` 不进地图 |
+| `srpe_sync.py` | 一手住宅物業銷售資訊網（SRPE）增量同步：每次只问「过去 2 天成交册有更新的盘」，重下并解析这些盘的成交记录册，改写 `data/srpe/` 里对应几行；PDF 和逐单不进 git |
 | `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
 | `notify_utils.py` | 数据 diff 与 SMTP 发信 |
 | `data/baseline/` | 上次确认的数据快照（提交到 Git），用于判断「是否有更新」 |
+| `data/srpe/` | SRPE 汇总：`index.csv`（全部一手盘，含坐标与销售状态）、`summary.csv`（每盘已售 / 撻订 / 均价 / 近 30·90 天）、`monthly.csv`（每盘每月成交）、`daily.csv`（每盘每日成交，用来重算近 30·90 天） |
 | `data/history/` | 待批预售楼花逐月历史、house730 日期缓存与上次成功的项目表、上次成功的 `land_chain.json`（均提交到 Git） |
 | `assets/echarts.min.js` | 内嵌的 ECharts 库（网页版离线可用） |
 | `.github/workflows/daily.yml` | GitHub Actions 定时任务 |

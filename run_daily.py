@@ -115,6 +115,23 @@ def _refresh_land_chain() -> None:
             print("[run_daily] 无可回退结果，看板地图将提示数据缺失")
 
 
+SRPE_SCRIPT = PROJECT_DIR / "srpe_sync.py"
+
+
+def _refresh_srpe() -> None:
+    """一手销售资讯网增量同步：只重下过去两天成交册有更新的盘，改 data/srpe/ 里对应几行。
+
+    失败不影响其他步骤——data/srpe/ 里仍是上次的结果。
+    """
+    import subprocess
+
+    try:
+        subprocess.run([sys.executable, str(SRPE_SCRIPT), "--days", "2"], check=True, cwd=str(PROJECT_DIR))
+        print("[run_daily] SRPE 成交册已增量同步")
+    except Exception as e:
+        print(f"[run_daily] SRPE 同步失败（沿用上次数据）: {e}")
+
+
 def _regenerate_chart_from_output() -> None:
     """生成交互式 HTML 看板（ECharts），供 GitHub Pages 网页版查看。（已停用研报 PDF/PNG）"""
     sys.path.insert(0, str(PROJECT_DIR))
@@ -150,6 +167,7 @@ def main() -> int:
 
     _refresh_house730()
     _refresh_land_chain()
+    _refresh_srpe()
     _regenerate_chart_from_output()
 
 
