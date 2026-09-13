@@ -468,15 +468,18 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
                         by_co.add(int(k))
             # 地段号对上的不看距离：来源库里有些点的坐标错到几十公里外
             idx = sorted(by_lot | near | by_co, key=lambda k: (k not in by_lot, land.date[k] if pd.notna(land.date[k]) else pd.Timestamp.max))
-            res.append(idx)
+            res.append([(k, "地段号" if k in by_lot else "坐标" if k in near else "公司名") for k in idx])
         return res
     land["cos"] = land.party.map(company_keys)
     PS["land_idx"] = attach_land(PS)
     BD["land_idx"] = attach_land(BD, use_company=True)
     # 动工必须晚于批地，否则是旧楼的记录
-    BD["land_idx"] = [[k for k in ix if pd.isna(land.date[k]) or land.date[k].strftime("%Y-%m") <= BD.last_ym[j]]
+    BD["land_idx"] = [[(k, how) for k, how in ix if pd.isna(land.date[k]) or land.date[k].strftime("%Y-%m") <= BD.last_ym[j]]
                       for j, ix in enumerate(BD.land_idx)]
-    used_land = set(k for ix in PS.land_idx for k in ix) | set(k for ix in BD.land_idx for k in ix)
+    PS["land_how"] = [dict(ix) for ix in PS.land_idx]
+    BD["land_how"] = [dict(ix) for ix in BD.land_idx]
+    PS["land_idx"] = [[k for k, _ in ix] for ix in PS.land_idx]
+    BD["land_idx"] = [[k for k, _ in ix] for ix in BD.land_idx]
 
     # ---------- 预售地盘 -> 动工地盘（一对多）----------
     # A: 30 米内直接算同一地盘
@@ -539,12 +542,13 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             "applicant": sub.applicant.iloc[0], "n": len(js),
         }
 
-    def land_records(ix):
+    def land_records(ix, how=None):
         recs = []
         for k in ix:
             r = land.iloc[k]
             recs.append({
                 "kind": r.kind, "date": r.date.strftime("%Y-%m-%d") if pd.notna(r.date) else "",
+                "basis": (how or {}).get(k, ""),
                 "lot": str(r.lot)[:80], "use": r.use[:60],
                 "premium_m": None if pd.isna(r.premium_m) else round(float(r.premium_m), 1),
                 "area": None if pd.isna(r.area) else int(r.area), "party": r.party[:80],
@@ -567,8 +571,15 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
 
     # ---------- 输出 ----------
     sites = []
+    used_land: set[int] = set()
     for i, p in PS.iterrows():
-        recs = land_records(p.land_idx)
+        how = dict(p.land_how)
+        for j in p.bd:                      # 动工地盘按坐标 / 公司接到的土地记录也算这个盘的
+            for k, h in BD.land_how[j].items():
+                how.setdefault(k, h)
+        idx = list(p.land_idx) + [k for k in how if k not in p.land_idx]
+        used_land.update(idx)
+        recs = land_records(idx, how)
         b = bd_agg(p.bd)
         if b is None:
             # 5.4/5.5 漏登的盘（启德 1F-1、屯门凱和山这类）：批则和入伙纸直接找
@@ -598,7 +609,8 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             continue
         if b.units == 0 and not re.search(r"Apartment|Residential|House|Domestic|Villa|Flat|Composite", str(b.btype), re.I):
             continue        # 0 伙的非住宅（学校、货仓）只用来匹配，不出图
-        recs = land_records(b.land_idx)
+        recs = land_records(b.land_idx, b.land_how)
+        used_land.update(b.land_idx)
         sites.append({
             "id": f"b{j}", "lat": round(float(b.lat), 6), "lon": round(float(b.lon), 6),
             "stage": "已入伙·未预售" if b.op_units >= 0.5 * b.units else "动工未预售",
