@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -34,6 +35,7 @@ LAYERS = {
     "lotext":   "common/landsd_rcd_1637904522249_2213",   # LAO_LEE 已签立地段扩展
     "bd_plan":  "common/bd_rcd_1629267205235_1286",       # BDMD53 已批图则
     "bd_start": "common/bd_rcd_1629267205235_33875",      # BDMD54 已发施工同意书
+    "bd_notify": "common/bd_rcd_1629267205236_22761",     # BDMD55 已收到上盖工程动工通知
     "bd_op":    "common/bd_rcd_1629267205236_397",        # BDMD56 已发佔用许可证
 }
 
@@ -138,6 +140,23 @@ def norm_co(s) -> str:
     s = re.sub(r"\b(limited|ltd|company|co|holdings?|development|developments|investments?)\b", "",
                str(s or "").lower())
     return re.sub(r"[^a-z0-9]", "", s)
+
+
+def company_keys(text) -> frozenset:
+    """'Macfull Limited (China Overseas Land & Investment)' / 'A Ltd<br/>B Ltd' -> 每个名字一个规范 token。"""
+    t = re.sub(r"<br\s*/?>", ";", str(text or ""))
+    return frozenset(k for k in (norm_co(x) for x in re.split(r"[;()]", t)) if len(k) >= 5)
+
+
+def company_sim(a: frozenset, b: frozenset) -> float:
+    """两组公司名的最大相似度，容拼写错（Investmant / Haircourt 这种官方录入错误不少）。"""
+    best = 0.0
+    for x in a:
+        for y in b:
+            if x == y:
+                return 1.0
+            best = max(best, difflib.SequenceMatcher(None, x, y).ratio())
+    return best
 
 
 HK_BBOX = (22.13, 22.60, 113.80, 114.50)      # lat_min, lat_max, lon_min, lon_max
@@ -283,30 +302,47 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     ps["site"] = [uf.f(s) for s in ps.site]
 
     # ---------- 屋宇署 ----------
-    b_start = raw["bd_start"].rename(columns={
-        "ADDRESS_EN": "address", "NSEARCH02_EN": "btype", "NSEARCH03_EN": "units",
-        "NSEARCH08_EN": "ap", "NSEARCH10_EN": "applicant", "LATITUDE": "lat", "LONGITUDE": "lon"})
-    for c in ("address", "btype", "ap", "applicant"):
-        b_start[c] = b_start[c].fillna("").astype(str)
-    b_start["units"] = to_num(b_start.units).fillna(0)
-    b_start["ym"] = ym(b_start)
+    # 动工证据 = 5.4 施工同意书 ∪ 5.5 上盖动工通知。大盘常常只在 5.4 登记地库那次（地址 "Yellow Area"，
+    # 单位数 "-"），上盖不再作为新建楼宇登一次，所以 0 伙的记录也要留着当「已动工」；伙数另算。
+    def _bd_works(df, table):
+        df = df.rename(columns={"ADDRESS_EN": "address", "NSEARCH02_EN": "btype", "NSEARCH03_EN": "units",
+                                "NSEARCH08_EN": "ap", "NSEARCH10_EN": "applicant", "LATITUDE": "lat", "LONGITUDE": "lon"})
+        for c in ("address", "btype", "ap", "applicant"):
+            df[c] = df[c].fillna("").astype(str)
+        df["units"] = to_num(df.units).fillna(0)
+        df["ym"] = ym(df)
+        df["table"] = table
+        return df
+    b_start = pd.concat([_bd_works(raw["bd_start"], "5.4"), _bd_works(raw["bd_notify"], "5.5")], ignore_index=True)
     b_start = clean_xy(b_start)
-    # 过渡性房屋不是私人住宅供应
-    b_start = b_start[~b_start.btype.astype(str).str.contains("Transitional", case=False)]
-    b_start = b_start[(b_start.units > 0) & b_start.lat.notna()].reset_index(drop=True)
+    # 过渡性房屋不是私人住宅供应；只留住宅类或地址带地段号的（0 伙的非住宅楼宇没用）
+    b_start = b_start[~b_start.btype.str.contains("Transitional", case=False)]
+    b_start["lots"] = b_start.address.map(canon_lots)
+    res_like = b_start.btype.str.contains(r"Apartment|Residential|House|Domestic|Villa|Flat|Composite", case=False, regex=True)
+    b_start = b_start[b_start.lat.notna() & ((b_start.units > 0) | res_like | (b_start.lots.map(len) > 0))].reset_index(drop=True)
     b_start["owner"] = b_start.applicant.map(owner_of)
     b_start["ap_n"] = b_start.ap.map(norm_ap)
     b_start["app_n"] = b_start.applicant.map(norm_co)
-    b_start["lots"] = b_start.address.map(canon_lots)
-    aps, apps = b_start.ap_n.values, b_start.app_n.values
-    b_start["site"] = cluster(b_start, 30, lambda i, j: len(aps[i] & aps[j]) >= 2 or (apps[i] and apps[i] == apps[j]))
+    aps, apps, lots_ = b_start.ap_n.values, b_start.app_n.values, b_start.lots.values
+    b_start["site"] = cluster(b_start, 30, lambda i, j: len(aps[i] & aps[j]) >= 2 or (apps[i] and apps[i] == apps[j]) or bool(lots_[i] & lots_[j]))
+    # 同一地段号、相距超过 30 米的也并成一个地盘（大地盘 5.4 和 5.5 的点可以差一百多米）
+    uf = UF(int(b_start.site.max()) + 1)
+    by_lot = {}
+    for st, ls_ in zip(b_start.site, b_start.lots):
+        for lt in ls_:
+            if lt in by_lot:
+                uf.u(by_lot[lt], st)
+            else:
+                by_lot[lt] = st
+    b_start["site"] = [uf.f(x) for x in b_start.site]
 
     b_plan = raw["bd_plan"].rename(columns={"ADDRESS_EN": "address", "NSEARCH05_EN": "ap",
                                             "NSEARCH03_EN": "dom_gfa", "LATITUDE": "lat", "LONGITUDE": "lon"})
     b_plan["dom_gfa"] = to_num(b_plan.dom_gfa).fillna(0)
     b_plan["ym"] = ym(b_plan)
     b_plan = clean_xy(b_plan)
-    b_plan = b_plan[(b_plan.dom_gfa > 0) & b_plan.lat.notna()].reset_index(drop=True)
+    b_plan["lots"] = b_plan.address.fillna("").map(canon_lots)
+    b_plan = b_plan[b_plan.lat.notna()].reset_index(drop=True)
     b_plan["ap_n"] = b_plan.ap.map(norm_ap)
 
     b_op = raw["bd_op"].rename(columns={"ADDRESS_EN": "address", "NSEARCH05_EN": "units",
@@ -314,6 +350,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     b_op["units"] = to_num(b_op.units).fillna(0)
     b_op["ym"] = ym(b_op)
     b_op = clean_xy(b_op)
+    b_op["lots"] = b_op.address.fillna("").map(canon_lots)
     b_op = b_op[(b_op.units > 0) & b_op.lat.notna()].reset_index(drop=True)
     b_op["ap_n"] = b_op.ap.map(norm_ap)
 
@@ -379,21 +416,28 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
                              for r in d.sort_values("ym").itertuples()],
     })
     BD = agg_sites(b_start, {
-        "address": lambda d: d.address.iloc[0], "applicant": lambda d: d.applicant.iloc[-1],
+        "units": lambda d: int(max(d[d.table == "5.4"].units.sum(), d[d.table == "5.5"].units.sum())),
+        "address": lambda d: d.sort_values("units", ascending=False).address.iloc[0], "applicant": lambda d: d.applicant.iloc[-1],
         "btype": lambda d: d.btype.iloc[-1], "ap": lambda d: d.ap.iloc[-1],
         "owner": lambda d: next(o for o in ("港铁", "市建局", "房協", "房委会", "愉景湾", "私人") if o in set(d.owner)),
         "app_n": lambda d: norm_co(d.applicant.iloc[-1]),
+        "cos": lambda d: frozenset().union(*d.applicant.map(company_keys)),
     })
 
     # ---------- 批则 / 入伙 -> 动工地盘 ----------
     def attach_bd(src, radius, after=None):
         Ds = haversine(BD.lat.values[:, None], BD.lon.values[:, None], src.lat.values[None, :], src.lon.values[None, :])
+        lot_ix: dict[str, list[int]] = {}
+        for k, lts in enumerate(src.lots):
+            for lt in lts:
+                lot_ix.setdefault(lt, []).append(k)
         res = []
         for j in range(len(BD)):
-            idx = [int(k) for k in np.where(Ds[j] <= radius)[0]
-                   if (Ds[j, k] <= 30 or len(BD.aps[j] & src.ap_n[k]) >= 2)
-                   and (after is None or src.ym[k] >= BD[after][j])]
-            res.append(idx)
+            by_lot = {k for lt in BD.lots[j] for k in lot_ix.get(lt, [])}
+            idx = by_lot | {int(k) for k in np.where(Ds[j] <= radius)[0]
+                            if (Ds[j, k] <= 30 or len(BD.aps[j] & src.ap_n[k]) >= 2)
+                            and not (src.lots[k] and BD.lots[j] and not (src.lots[k] & BD.lots[j]))}
+            res.append(sorted(k for k in idx if after is None or src.ym[k] >= BD[after][j]))
         return res
     BD["plan_idx"] = attach_bd(b_plan, 120)
     BD["op_idx"] = attach_bd(b_op, 120, after="first_ym")     # 入伙纸不可能早于动工
@@ -403,23 +447,35 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     BD["op_units"] = BD.op_idx.map(lambda ix: int(b_op.units[ix].sum()) if ix else 0)
 
     # ---------- 土地记录 -> 地盘 ----------
-    def attach_land(S, radius=60):
+    def attach_land(S, base_radius=60, use_company=False):
         Dl = haversine(S.lat.values[:, None], S.lon.values[:, None], land.lat.values[None, :], land.lon.values[None, :])
         Dl = np.nan_to_num(Dl, nan=np.inf)
         lot_index: dict[str, list[int]] = {}
         for k, lts in enumerate(land.lots):
             for lt in lts:
                 lot_index.setdefault(lt, []).append(k)
+        # 卖地记录的点是地块、屋宇署的点是楼，大地盘能差一两百米：半径随 √面积 放
+        rad = base_radius + np.sqrt(land.area.fillna(0).values)
         res = []
         for i in range(len(S)):
             by_lot = {k for lt in S.lots[i] for k in lot_index.get(lt, [])}
-            near = set(int(k) for k in np.where(Dl[i] <= radius)[0])
+            near = {int(k) for k in np.where(Dl[i] <= rad)[0]
+                    if not (S.lots[i] and land.lots[k] and not (S.lots[i] & land.lots[k]))}   # 地段号明显不同的否决
+            by_co = set()
+            if use_company and S.cos[i]:
+                for k in np.where(Dl[i] <= 600)[0]:
+                    if company_sim(S.cos[i], land.cos[k]) >= 0.85:
+                        by_co.add(int(k))
             # 地段号对上的不看距离：来源库里有些点的坐标错到几十公里外
-            idx = sorted(by_lot | near, key=lambda k: (k not in by_lot, land.date[k] if pd.notna(land.date[k]) else pd.Timestamp.max))
+            idx = sorted(by_lot | near | by_co, key=lambda k: (k not in by_lot, land.date[k] if pd.notna(land.date[k]) else pd.Timestamp.max))
             res.append(idx)
         return res
+    land["cos"] = land.party.map(company_keys)
     PS["land_idx"] = attach_land(PS)
-    BD["land_idx"] = attach_land(BD)
+    BD["land_idx"] = attach_land(BD, use_company=True)
+    # 动工必须晚于批地，否则是旧楼的记录
+    BD["land_idx"] = [[k for k in ix if pd.isna(land.date[k]) or land.date[k].strftime("%Y-%m") <= BD.last_ym[j]]
+                      for j, ix in enumerate(BD.land_idx)]
     used_land = set(k for ix in PS.land_idx for k in ix) | set(k for ix in BD.land_idx for k in ix)
 
     # ---------- 预售地盘 -> 动工地盘（一对多）----------
@@ -427,7 +483,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     # B: 30~300 米，认可人士相同且单位数对得上（或单位数几乎相等）
     # C: 1.5 公里内共享同一份土地记录，且认可人士 / 申请人一致 —— 日出康城这种跨一公里的大盘
     D = haversine(PS.lat.values[:, None], PS.lon.values[:, None], BD.lat.values[None, :], BD.lon.values[None, :])
-    PS_vendor_n = PS.vendor.map(norm_co)
+    PS_cos = PS.vendor.map(company_keys)
     bd_of: list[list[int]] = [[] for _ in range(len(PS))]
     for i in range(len(PS)):
         picked = set(int(j) for j in np.where(D[i] <= 30)[0])
@@ -449,7 +505,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             if j in picked:
                 continue
             ap_same = len(PS.aps[i] & BD.aps[j]) >= 2
-            party_same = (PS_vendor_n[i] and PS_vendor_n[i] == BD.app_n[j]) or (PS.owner[i] == BD.owner[j] != "私人")
+            party_same = company_sim(PS_cos[i], BD.cos[j]) >= 0.85 or (PS.owner[i] == BD.owner[j] != "私人")
             shared_land = bool(my_land & set(BD.land_idx[j]))
             lot_same = bool(PS.lots[i] & BD.lots[j])
             if lot_same or (shared_land and (ap_same or party_same)) or (ap_same and party_same):
@@ -458,6 +514,19 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     PS["bd"] = bd_of
     BD["presold"] = False
     BD.loc[sorted({j for js in bd_of for j in js}), "presold"] = True
+
+    def direct_hits(src, lat, lon, lots, radius, aps=None, after="", units=None):
+        """没有动工地盘可挂时，批则 / OP 直接按地段号或半径找：30 米内直接算，再远要认可人士相同或伙数对得上。"""
+        hit = {k for k in range(len(src)) if lots & src.lots[k]}
+        d = haversine(lat, lon, src.lat.values, src.lon.values)
+        for k in np.where(d <= radius)[0]:
+            k = int(k)
+            if src.lots[k] and lots and not (lots & src.lots[k]):
+                continue
+            u_ok = units and "units" in src and abs(src.units[k] - units) / units <= 0.15
+            if d[k] <= 30 or aps is None or len(aps & src.ap_n[k]) >= 2 or u_ok:
+                hit.add(k)
+        return sorted(k for k in hit if src.ym[k] >= after)
 
     def bd_agg(js):
         if not js:
@@ -501,6 +570,14 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     for i, p in PS.iterrows():
         recs = land_records(p.land_idx)
         b = bd_agg(p.bd)
+        if b is None:
+            # 5.4/5.5 漏登的盘（启德 1F-1、屯门凱和山这类）：批则和入伙纸直接找
+            pl = direct_hits(b_plan, p.lat, p.lon, p.lots, 120, p.aps)
+            op = direct_hits(b_op, p.lat, p.lon, p.lots, 120, p.aps, units=p.units)
+            if pl or op:
+                b = {"units": None, "first_ym": "", "plan_ym": min(b_plan.ym[pl]) if pl else "",
+                     "op_ym": min(b_op.ym[op]) if op else "", "op_units": int(b_op.units[op].sum()) if op else 0,
+                     "applicant": "", "n": 0}
         zh, en = site_name(p.names_zh, p.names)
         op_done = b is not None and b["op_units"] >= 0.5 * p.units
         sites.append({
@@ -512,12 +589,15 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             "presale_units": int(p.units), "presale_first": p.first_ym, "presale_last": p.last_ym,
             "plan_ym": b["plan_ym"] if b else "", "start_ym": b["first_ym"] if b else "",
             "bd_units": b["units"] if b else None, "bd_sites": b["n"] if b else 0,
+            "bd_missing": bool(b and b["n"] == 0),       # 屋宇署 5.4/5.5 没登记，只有批则 / 入伙纸
             "op_ym": b["op_ym"] if b else "", "op_units": b["op_units"] if b else 0,
             "ap": str(p.ap).split(" - ")[0], "applicant": b["applicant"] if b else "",
         })
     for j, b in BD.iterrows():
         if b.presold or b.first_ym < f"{LAND_FROM_YEAR}-01":
             continue
+        if b.units == 0 and not re.search(r"Apartment|Residential|House|Domestic|Villa|Flat|Composite", str(b.btype), re.I):
+            continue        # 0 伙的非住宅（学校、货仓）只用来匹配，不出图
         recs = land_records(b.land_idx)
         sites.append({
             "id": f"b{j}", "lat": round(float(b.lat), 6), "lon": round(float(b.lon), 6),
@@ -538,7 +618,13 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             continue
         if r.kind == "地段扩展":
             continue
-        # 屋宇署的基础工程同意书表 2023 年才开始有，历史不全，不用它区分地基 / 上盖
+        # 有批则没动工也算未开上盖；批则按地段号或半径（60+√面积）找
+        plan_hits = [k for k in range(len(b_plan)) if r.lots & b_plan.lots[k]]
+        if not plan_hits:
+            dp = haversine(r.lat, r.lon, b_plan.lat.values, b_plan.lon.values)
+            plan_hits = [int(k) for k in np.where(dp <= 60 + np.sqrt(r.area if pd.notna(r.area) else 0))[0]
+                         if not (b_plan.lots[k] and not (r.lots & b_plan.lots[k]))]
+        plan_hits = [k for k in plan_hits if b_plan.ym[k] >= r.date.strftime("%Y-%m")]
         src = source_of("私人", [{"kind": r.kind}])
         sites.append({
             "id": f"l{k}", "lat": round(float(r.lat), 6), "lon": round(float(r.lon), 6),
@@ -546,7 +632,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             "address": str(r.address), "owner": "私人", "vendor": "",
             "source": src, "land": land_records([k]),
             "presale_units": 0, "presale_first": "", "presale_last": "",
-            "plan_ym": "", "start_ym": "", "bd_units": None, "op_ym": "", "op_units": 0,
+            "plan_ym": min(b_plan.ym[plan_hits]) if plan_hits else "", "start_ym": "", "bd_units": None, "op_ym": "", "op_units": 0,
             "area": None if pd.isna(r.area) else int(r.area),
             "premium_m": None if pd.isna(r.premium_m) else round(float(r.premium_m), 1),
             "ap": "", "applicant": "",

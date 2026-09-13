@@ -151,7 +151,7 @@ MAP_JS = r"""
     if (s.stage === '批地未动工') h += '<tr><td>上盖</td><td style="color:#94a3b8">屋宇署未发上盖施工同意书</td></tr>';
     if (s.start_ym) h += '<tr><td>动工</td><td>' + esc(s.start_ym) + (s.bd_units != null ? ' · <b>' + fmtUnits(s.bd_units) + '</b> 伙' : '') +
       (s.bd_sites > 1 ? '（' + s.bd_sites + ' 个屋宇署地盘）' : '') + '</td></tr>';
-    else if (s.stage !== '批地未动工') h += '<tr><td>动工</td><td style="color:#94a3b8">屋宇署无施工同意书记录</td></tr>';
+    else if (s.stage !== '批地未动工') h += '<tr><td>动工</td><td style="color:#94a3b8">' + (s.bd_missing ? '屋宇署 5.4/5.5 未登记此盘（只有批则 / 入伙纸）' : '屋宇署无施工同意书记录') + '</td></tr>';
     if (s.presale_first) {
       var ph = s.presale_first === s.presale_last ? s.presale_first : s.presale_first + ' ~ ' + s.presale_last;
       h += '<tr><td>预售</td><td>' + esc(ph) + ' · <b>' + fmtUnits(s.presale_units) + '</b> 伙';
