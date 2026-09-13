@@ -302,8 +302,8 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     ps["site"] = [uf.f(s) for s in ps.site]
 
     # ---------- 屋宇署 ----------
-    # 动工证据 = 5.4 施工同意书 ∪ 5.5 上盖动工通知。大盘常常只在 5.4 登记地库那次（地址 "Yellow Area"，
-    # 单位数 "-"），上盖不再作为新建楼宇登一次，所以 0 伙的记录也要留着当「已动工」；伙数另算。
+    # 动工证据 = 5.4 施工同意书 ∪ 5.5 上盖动工通知（5.5 比 5.4 晚约一个月，各自都有漏登，取并集）。
+    # 住宅塔楼登记时一定带伙数；0 伙的是休憩空间上的凉亭、厕所、花架这类附属构筑物，不算动工证据。
     def _bd_works(df, table):
         df = df.rename(columns={"ADDRESS_EN": "address", "NSEARCH02_EN": "btype", "NSEARCH03_EN": "units",
                                 "NSEARCH08_EN": "ap", "NSEARCH10_EN": "applicant", "LATITUDE": "lat", "LONGITUDE": "lon"})
@@ -315,11 +315,11 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
         return df
     b_start = pd.concat([_bd_works(raw["bd_start"], "5.4"), _bd_works(raw["bd_notify"], "5.5")], ignore_index=True)
     b_start = clean_xy(b_start)
-    # 过渡性房屋不是私人住宅供应；只留住宅类或地址带地段号的（0 伙的非住宅楼宇没用）
+    # 过渡性房屋不是私人住宅供应
     b_start = b_start[~b_start.btype.str.contains("Transitional", case=False)]
     b_start["lots"] = b_start.address.map(canon_lots)
     res_like = b_start.btype.str.contains(r"Apartment|Residential|House|Domestic|Villa|Flat|Composite", case=False, regex=True)
-    b_start = b_start[b_start.lat.notna() & ((b_start.units > 0) | res_like | (b_start.lots.map(len) > 0))].reset_index(drop=True)
+    b_start = b_start[b_start.lat.notna() & ((b_start.units > 0) | res_like)].reset_index(drop=True)
     b_start["owner"] = b_start.applicant.map(owner_of)
     b_start["ap_n"] = b_start.ap.map(norm_ap)
     b_start["app_n"] = b_start.applicant.map(norm_co)
@@ -625,14 +625,17 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             plan_hits = [int(k) for k in np.where(dp <= 60 + np.sqrt(r.area if pd.notna(r.area) else 0))[0]
                          if not (b_plan.lots[k] and not (r.lots & b_plan.lots[k]))]
         plan_hits = [k for k in plan_hits if b_plan.ym[k] >= r.date.strftime("%Y-%m")]
+        op_hits = [k for k in range(len(b_op)) if (r.lots & b_op.lots[k]) and b_op.ym[k] >= r.date.strftime("%Y-%m")]
         src = source_of("私人", [{"kind": r.kind}])
         sites.append({
             "id": f"l{k}", "lat": round(float(r.lat), 6), "lon": round(float(r.lon), 6),
-            "stage": "批地未动工", "name": str(r.address)[:60] or str(r.lot)[:60], "name_en": "", "phases": [],
+            "stage": "已入伙·未预售" if op_hits else "批地未动工",
+            "name": str(r.address)[:60] or str(r.lot)[:60], "name_en": "", "phases": [],
             "address": str(r.address), "owner": "私人", "vendor": "",
             "source": src, "land": land_records([k]),
             "presale_units": 0, "presale_first": "", "presale_last": "",
-            "plan_ym": min(b_plan.ym[plan_hits]) if plan_hits else "", "start_ym": "", "bd_units": None, "op_ym": "", "op_units": 0,
+            "plan_ym": min(b_plan.ym[plan_hits]) if plan_hits else "", "start_ym": "", "bd_units": None,
+            "op_ym": min(b_op.ym[op_hits]) if op_hits else "", "op_units": int(b_op.units[op_hits].sum()) if op_hits else 0,
             "area": None if pd.isna(r.area) else int(r.area),
             "premium_m": None if pd.isna(r.premium_m) else round(float(r.premium_m), 1),
             "ap": "", "applicant": "",
