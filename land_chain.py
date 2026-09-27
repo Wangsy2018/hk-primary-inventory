@@ -284,6 +284,43 @@ def site_name(zh_names, en_names) -> tuple[str, str]:
     return pick(zh_names, _clean_zh), pick(en_names, _clean_en)
 
 
+_PHASE_CN = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5", "六": "6", "七": "7",
+             "八": "8", "九": "9", "十": "10", "十一": "11", "十二": "12", "十三": "13"}
+_PHASE_ROMAN = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8, "IX": 9,
+                "X": 10, "XI": 11, "XII": 12, "XIII": 13, "XIV": 14, "XV": 15, "XVI": 16}
+
+
+def phase_token(text) -> str:
+    """期数标签统一成「阿拉伯数字 + 字母」：
+
+    'Phase IVA of LOHAS Park -Wings at Sea' / 'PHASE IVA' / '日出康城 第5A期 -MALIBU' -> '4A'
+    '日出康城第XIIC期' -> '12C'（XII 是罗马数字、C 是子期编号，不能当成罗马数字 100）
+    '西沙灣發展項目 (第1A(2)期)' -> '1A(2)'
+    """
+    t = re.sub(r"\s+", " ", str(text or "")).strip().upper()
+    for zh, ar in _PHASE_CN.items():          # 第一期 / 第二期 …
+        t = t.replace(f"第{zh}期", f"第{ar}期").replace(f"第 {zh} 期", f"第{ar}期")
+    # 后缀字母必须紧跟数字且后面不再是字母，否则 'PHASE 1 OF THE HENLEY' 会被读成 '1O'
+    m = (re.search(r"PHASE\s*([IVXLC]+|\d+)\s*([A-Z](?![A-Z]))?\s*(\(\d+\))?", t)
+         or re.search(r"第\s*([IVXLC]+|\d+)\s*([A-Z](?![A-Z]))?\s*(\(\d+\))?\s*期", t)
+         or re.fullmatch(r"([IVXLC]+|\d+)\s*([A-Z](?![A-Z]))?\s*(\(\d+\))?", t))
+    if not m:
+        return ""
+    head, suffix, paren = m.group(1), m.group(2) or "", m.group(3) or ""
+    if head.isdigit():
+        num = int(head)
+    else:
+        # 罗马数字后面常直接跟子期字母（XIIC = 第 12 期 C），取表里能对上的最长前缀
+        num = None
+        for k in sorted(_PHASE_ROMAN, key=len, reverse=True):
+            if head.startswith(k):
+                num, suffix = _PHASE_ROMAN[k], head[len(k):] + suffix
+                break
+        if num is None:
+            return ""
+    return f"{num}{suffix}{paren}"
+
+
 # ----------------------------------------------------------------------------
 # 并查集 + 地盘聚类
 # ----------------------------------------------------------------------------
@@ -953,6 +990,94 @@ def add_unmatched_sales(sites: list[dict], miss: pd.DataFrame | None) -> int:
     return n
 
 
+SRPE_SUMMARY = Path(__file__).resolve().parent / "data" / "srpe" / "summary.csv"
+
+
+def attach_srpe_projects(sites: list[dict]) -> int:
+    """把 SRPE 的「独立发展项目」挂到地盘上，作为地盘下面的一层。
+
+    港铁上盖、NOVO LAND、峻巒这类一块地分很多期卖的盘，预售同意书共用一个地段号
+    （日出康城 21 份同意书全是 TKOTL 70 RP），地段号聚类必然并成一个地盘 —— 地价、
+    批则这些确实属于整块地，但「哪一期在卖、卖了多少」属于每一期。
+
+    SRPE 按《一手住宅物业销售条例》逐个发展项目登记（日出康城在它那里是 17 个），
+    每个有自己的坐标、售楼书和成交纪录册，正好是「期」这一层的官方名册。
+    """
+    if not SRPE_INDEX.exists():
+        return 0
+    try:
+        idx = pd.read_csv(SRPE_INDEX, dtype={"devId": str})
+        if SRPE_SUMMARY.exists():
+            idx = idx.merge(pd.read_csv(SRPE_SUMMARY, dtype={"devId": str}), on="devId", how="left")
+        idx["lat"] = pd.to_numeric(idx.lat, errors="coerce")
+        idx["lon"] = pd.to_numeric(idx.lon, errors="coerce")
+        idx = idx[idx.lat.notna()].reset_index(drop=True)
+    except Exception as e:      # noqa: BLE001
+        print(f"  [land_chain] SRPE 名册读取失败，跳过分期: {e}")
+        return 0
+
+    for s in sites:
+        s["projects"] = []
+    lat = np.array([s["lat"] for s in sites]); lon = np.array([s["lon"] for s in sites])
+    n = 0
+    for _, r in idx.iterrows():
+        d = haversine(r.lat, r.lon, lat, lon)
+        ak = addr_key(r.address_en)
+        zh = str(r.name_zh or "")
+        nm = name_keys(r.name_en)
+        best = None
+        for si in np.where(d <= 800)[0]:
+            s = sites[si]
+            if s.get("no_presale"):
+                continue
+            names = set(name_keys(s.get("name_en") or ""))
+            for ph in s.get("phases", []):
+                names |= name_keys(ph.get("name_en") or "")
+            strong = (ak and ak == addr_key(s.get("address_en"))) or (zh and zh in s["name"])
+            prio = 0 if strong else (1 if (nm & names) else 2)
+            if prio == 2 and d[si] > 150:
+                continue
+            if best is None or (prio, d[si]) < best[0]:
+                best = ((prio, d[si]), int(si))
+        if best is None:
+            continue
+        s = sites[best[1]]
+        tok = phase_token(r.phase) or phase_token(r.name_en)
+        units = None
+        for ph in s.get("phases", []):
+            if tok and phase_token(ph.get("name")) == tok or (tok and phase_token(ph.get("name_en")) == tok):
+                units = int(ph["units"]); break
+        sold = pd.to_numeric(r.get("sold"), errors="coerce")
+        s["projects"].append({
+            "devId": str(r.devId), "name": zh or str(r.name_en or ""), "name_en": str(r.name_en or ""),
+            "phase": "" if pd.isna(r.phase) else str(r.phase), "token": tok,
+            "lat": round(float(r.lat), 6), "lon": round(float(r.lon), 6),
+            "units": units, "sold": None if pd.isna(sold) else int(sold),
+            "active": str(r.get("active") or ""), "first_print": str(r.get("first_print") or "")[:10],
+            "last_pasp": "" if pd.isna(r.get("last_pasp")) else str(r.get("last_pasp"))[:10],
+        })
+        n += 1
+    for s in sites:
+        ps = s.get("projects") or []
+        # 整个地盘只有一个发展项目：期数怎么写都无所谓，伙数就是地盘的
+        if len(ps) == 1 and ps[0]["units"] is None and s.get("presale_units"):
+            ps[0]["units"] = int(s["presale_units"])
+        # 多期但只剩一期没对上、也只剩一期预售没被认领：按剩余配对
+        elif len(ps) > 1:
+            miss = [p for p in ps if p["units"] is None]
+            claimed = {p["token"] for p in ps if p["units"] is not None and p["token"]}
+            free = [ph for ph in s.get("phases", []) if phase_token(ph.get("name")) not in claimed
+                    and phase_token(ph.get("name_en")) not in claimed]
+            if len(miss) == 1 and len(free) == 1:
+                miss[0]["units"] = int(free[0]["units"])
+        ps.sort(key=lambda p: (p["first_print"] or "9999", p["phase"]))
+    multi = sum(1 for s in sites if len(s.get("projects") or []) > 1)
+    matched_units = sum(1 for s in sites for p in s["projects"] if p["units"] is not None)
+    print(f"  [land_chain] SRPE 名册 {len(idx)} 个发展项目 -> 挂上 {n} 个；"
+          f"{multi} 个地盘含多期，其中 {matched_units}/{n} 期对上了预售伙数")
+    return n
+
+
 def attach_sales(sites: list[dict], house730_csv: Path | None) -> pd.DataFrame | None:
     """挂 house730 余货并判定销售状态；返回没接到任何地盘的 house730 行。"""
     h = None
@@ -1028,6 +1153,7 @@ def main() -> int:
     data = build(raw)
     miss = attach_sales(data["sites"], Path(args.house730) if args.house730 else None)
     add_unmatched_sales(data["sites"], miss)
+    attach_srpe_projects(data["sites"])
     st = Counter(); su = Counter()
     for x in data["sites"]:
         st[x["status"]] += 1

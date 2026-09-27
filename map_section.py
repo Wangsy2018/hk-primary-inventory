@@ -65,6 +65,7 @@ MAP_HTML = """
       <option value="0">全部规模</option><option value="100">≥ 100 伙</option>
       <option value="300">≥ 300 伙</option><option value="1000">≥ 1,000 伙</option>
     </select>
+    <label title="港铁上盖、NOVO LAND 这类一块地分很多期卖的盘，按一手销售资讯网的发展项目名册拆开"><input type="checkbox" id="map-split" checked> 按期拆分</label>
     <select id="map-size" title="圆点大小按什么算">
       <option value="units">大小：总伙数</option><option value="remaining">大小：余货</option>
     </select>
@@ -129,6 +130,29 @@ MAP_JS = r"""
 
   function popupHtml(s) {
     var h = '<h4>' + esc(s.name) + '</h4>';
+    if (s._proj) {
+      var p = s._proj, left = (p.units != null && p.sold != null) ? Math.max(0, p.units - p.sold) : null;
+      h += '<div class="en">' + esc(s._parent.name) + ' 的一期 · 一手销售资讯网登记为独立发展项目</div>';
+      h += '<div class="tags"><span style="background:' + (SRC_COLOR[s.source] || '#999') + '22;color:' + (SRC_COLOR[s.source] || '#333') + '">' + esc(s.source) + '</span><span>' + esc(s.status) + '</span></div>';
+      h += '<table class="chain">';
+      h += '<tr><td>本期</td><td>' + (p.units != null ? '批出 <b>' + fmtUnits(p.units) + '</b> 伙 · ' : '') +
+        '已售 <b>' + (p.sold != null ? fmtUnits(p.sold) : '—') + '</b>' + (left != null ? ' · 余 <b>' + fmtUnits(left) + '</b>' : '') +
+        (p.first_print ? '<br><span style="color:#94a3b8">售楼书 ' + esc(p.first_print) + (p.last_pasp ? ' · 最近成交 ' + esc(p.last_pasp) : '') + '</span>' : '') +
+        '</td></tr>';
+      h += '<tr><td>整盘</td><td>' + esc(s._parent.name) + ' 共 ' + (s._parent.projects || []).length + ' 期在册 · 预售批出 <b>' + fmtUnits(s._parent.presale_units) + '</b> 伙</td></tr>';
+      h += '</table><table class="chain">';
+      var pa = s._parent;
+      if (pa.land && pa.land.length) {
+        var r = pa.land[0];
+        h += '<tr><td>批地</td><td><b>' + esc(r.kind) + '</b> ' + esc(r.date) + (r.premium_m ? ' · 地价 ' + fmtPremium(r.premium_m) : '') + '</td></tr>';
+      }
+      if (pa.plan_ym) h += '<tr><td>批则</td><td>' + esc(pa.plan_ym) + '</td></tr>';
+      if (pa.start_ym) h += '<tr><td>动工</td><td>' + esc(pa.start_ym) + (pa.bd_units != null ? ' · ' + fmtUnits(pa.bd_units) + ' 伙（整盘）' : '') + '</td></tr>';
+      if (pa.op_ym) h += '<tr><td>入伙</td><td>' + esc(pa.op_ym) + ' · ' + fmtUnits(pa.op_units) + ' 伙（整盘）</td></tr>';
+      h += '</table>';
+      if (pa.address) h += '<div class="addr">' + esc(pa.address) + '</div>';
+      return h;
+    }
     if (s.name_en && s.name_en !== s.name) h += '<div class="en">' + esc(s.name_en) + '</div>';
     h += '<div class="tags"><span style="background:' + (SRC_COLOR[s.source] || '#999') + '22;color:' + (SRC_COLOR[s.source] || '#333') + '">' + esc(s.source) + '</span>';
     if (s.owner && s.owner !== '私人') h += '<span>' + esc(s.owner) + '</span>';
@@ -173,6 +197,16 @@ MAP_JS = r"""
         '<br><span style="color:#94a3b8">house730：' + esc(s.sale.projects.join('、')) + '</span></td></tr>';
     }
     if (s.op_ym) h += '<tr><td>入伙</td><td>' + esc(s.op_ym) + ' · <b>' + fmtUnits(s.op_units) + '</b> 伙</td></tr>';
+    if ((s.projects || []).length > 1) {
+      h += '<tr><td>分期</td><td>一手销售资讯网登记 <b>' + s.projects.length + '</b> 个独立发展项目<details><summary>各期明细</summary>';
+      s.projects.forEach(function (p) {
+        var left = (p.units != null && p.sold != null) ? Math.max(0, p.units - p.sold) : null;
+        h += '<div>' + esc(p.phase || p.name) + ' · ' + (p.units != null ? fmtUnits(p.units) + ' 伙' : '—') +
+          (p.sold != null ? ' · 已售 ' + fmtUnits(p.sold) : '') + (left ? ' · 余 ' + fmtUnits(left) : '') +
+          (p.active === 'Y' ? '' : ' <span style="color:#94a3b8">(已停售/售罄)</span>') + '</div>';
+      });
+      h += '</details></td></tr>';
+    }
     h += '</table>';
     var who = [];
     if (s.applicant) who.push('申请人 ' + s.applicant.replace(/<br\s*\/?>/g, ' / '));
@@ -183,7 +217,7 @@ MAP_JS = r"""
     return h;
   }
 
-  var sizeBy = 'units';
+  var sizeBy = 'units', splitOn = true;
   function sizeValue(s) {
     if (sizeBy === 'remaining') return s.sale ? s.sale.remaining : 0;
     return s.presale_units || s.bd_units || 0;
@@ -207,12 +241,33 @@ MAP_JS = r"""
     };
   }
 
+  // 一块地分多期卖的盘（港铁上盖、NOVO LAND…），预售同意书共用一个地段号，必然并成一个地盘。
+  // 一手销售资讯网按「发展项目」逐期登记，每期有自己的坐标和成交纪录册，就用它拆。
+  function expand(s) {
+    var ps = s.projects || [];
+    if (!splitOn || ps.length < 2) return [s];
+    return ps.map(function (p) {
+      var left = (p.units != null && p.sold != null) ? Math.max(0, p.units - p.sold) : null;
+      var selling = p.active === 'Y' && (left == null || left > 0);
+      return Object.assign({}, s, {
+        lat: p.lat, lon: p.lon, _proj: p, _parent: s,
+        name: (p.name || s.name) + (p.phase ? ' ' + p.phase : ''),
+        presale_units: p.units || 0,
+        status: selling ? '在售' : '已售罄·已入伙',
+        sale: (p.units != null && p.sold != null)
+          ? { projects: [], total: p.units, sold: p.sold, remaining: left, first_sales: p.first_print } : null
+      });
+    });
+  }
+
   function render() {
     if (!map || !data) return;
     var f = currentFilter();
     layer.clearLayers();
     var shown = [], units = {}, cnt = {}, remaining = 0, premium = {};
-    data.sites.forEach(function (s) {
+    var list = [];
+    data.sites.forEach(function (s) { expand(s).forEach(function (x) { list.push(x); }); });
+    list.forEach(function (s) {
       if (!f.status[s.status]) return;
       if (f.src && s.source !== f.src) return;
       var u = s.presale_units || s.bd_units || 0;
@@ -246,7 +301,7 @@ MAP_JS = r"""
       if (!cnt[k]) return;
       parts.push(k + ' ' + cnt[k] + (premium[k] ? ' 幅（地价 ' + (premium[k] / 100).toFixed(0) + ' 亿）' : ' 个' + (units[k] ? '（' + fmtUnits(units[k]) + ' 伙）' : '')));
     });
-    note('显示 ' + shown.length + ' 个地盘：' + (parts.join(' · ') || '无') +
+    note('显示 ' + shown.length + (splitOn ? ' 个（含分期）：' : ' 个地盘：') + (parts.join(' · ') || '无') +
       (remaining ? ' · 余货合计 ' + fmtUnits(remaining) + ' 伙' : '') +
       ' · 预售至 ' + data.as_of.presale + ' · 屋宇署至 ' + data.as_of.bd_start + ' · 土地记录至 ' + data.as_of.land + baseNote);
     if (f.q && shown.length && shown.length <= 30) {
@@ -322,6 +377,7 @@ MAP_JS = r"""
       });
     });
     sec.querySelectorAll('#map-src, #map-min').forEach(function (el) { el.addEventListener('change', render); });
+    document.getElementById('map-split').addEventListener('change', function () { splitOn = this.checked; render(); });
     var t;
     document.getElementById('map-q').addEventListener('input', function () { clearTimeout(t); t = setTimeout(render, 250); });
   }
