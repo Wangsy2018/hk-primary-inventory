@@ -684,7 +684,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
             return "换地补地价"
         if "契约修订" in kinds or "地段扩展" in kinds:
             return "契约修订补地价"
-        return "未知"
+        return "无批地记录"
 
     # ---------- 输出 ----------
     sites = []

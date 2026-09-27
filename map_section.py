@@ -75,7 +75,7 @@ MAP_HTML = """
   <div id="map" class="map"></div>
   <div class="map-note">
     圆点大小默认按总伙数，只勾「在售」时自动改按 house730 余货（也可手动切）；颜色是土地来源：<b>公开卖地</b>（地政总署卖地记录）、<b>换地 / 契约修订补地价</b>（已签立换地、契约修订记录）、
-    <b>港铁上盖</b>（预售卖方为港铁 / 九铁物业公司）、<b>市建局</b>、<b>房協</b>。实心 = 在售（house730 有余货）；黑边 = 已批预售但 house730 未见开售；
+    <b>港铁上盖</b>（预售卖方为港铁 / 九铁物业公司）、<b>市建局</b>；灰色是 2010 年前批地或现楼盘，链上接不到批地记录。实心 = 在售（house730 有余货）；黑边 = 已批预售但 house730 未见开售；
     虚边 = 屋宇署已发施工同意书但未批预售；空心 = 已批地（政府卖地 / 换地补价）但屋宇署未发上盖施工同意书，大小按地盘面积；淡色 = 已售罄 / 已入伙。各图层之间没有共同编号，靠坐标（30 米内）和地段号对上，大型屋苑一个点对应多个屋宇署地盘，
     「预售批出」是全盘已批的伙数，「已推出」是 house730 收录到单位表的期数，两者差额即已批未推出；现楼盘没有预售同意书，用 house730 坐标单独落点。少数记录官方坐标有误已剔除。点圆点看这块地从批地到入伙的每一步。
   </div>
@@ -88,9 +88,10 @@ MAP_JS = r"""
   if (!sec) return;
   var SRC_COLOR = {
     '公开卖地': '#1f6feb', '换地补地价': '#f59e0b', '契约修订补地价': '#a855f7', '港铁上盖': '#e11d48',
-    '市建局': '#059669', '房協': '#0891b2', '愉景湾': '#64748b', '未知': '#9ca3af'
+    '市建局': '#059669', '愉景湾': '#0891b2', '无批地记录': '#a8b3c4'
   };
-  var SRC_ORDER = ['公开卖地', '换地补地价', '契约修订补地价', '港铁上盖', '市建局', '房協', '愉景湾', '未知'];
+  var SRC_ORDER = ['公开卖地', '换地补地价', '契约修订补地价', '港铁上盖', '市建局', '愉景湾', '无批地记录'];
+  var SRC_NOTE = { '无批地记录': '2010 年前批的地，或现楼盘' };
   var STATUS_STYLE = {
     '在售':          { fillOpacity: 0.85, weight: 1.2 },
     '已批预售·未开售': { fillOpacity: 0.85, weight: 2.5, color: '#111' },
@@ -102,7 +103,19 @@ MAP_JS = r"""
     '换地补价·未开上盖':   { fillOpacity: 0.0, weight: 2.4 }
   };
   var STATUS_ORDER = ['在售', '已批预售·未开售', '已批预售', '已动工·未预售', '政府已卖地·未开上盖', '换地补价·未开上盖', '已售罄·已入伙', '已入伙·未预售'];
-  var map, layer, data, baseNote = '';
+  var map, layer, data, legendEl = null, baseNote = '';
+
+  // 图例按当前地图上真有的来源生成 —— 写死的话会列出一个都没有的分类（房協），
+  // 又漏掉占了一半地盘的「无批地记录」，看到满屏灰点却在图例里找不到
+  function drawLegend(counts) {
+    if (!legendEl) return;
+    var rows = SRC_ORDER.filter(function (k) { return counts[k]; }).map(function (k) {
+      return '<div><i style="background:' + SRC_COLOR[k] + '"></i>' + k +
+        ' <span style="color:#94a3b8">' + counts[k] + (SRC_NOTE[k] ? ' · ' + SRC_NOTE[k] : '') + '</span></div>';
+    }).join('');
+    legendEl.innerHTML = rows + '<div class="st"><i style="background:#334155"></i>实心 在售 &nbsp; <i style="background:#334155;border:2px solid #111"></i>黑边 已批预售未开售<br>' +
+        '<i style="border:2px dashed #334155;background:#33415588"></i>虚边 动工未预售 &nbsp; <i style="border:2px solid #334155"></i>空心 已批地未开上盖（大小按面积）</div>';
+  }
   var sumEl = document.getElementById('map-sum');
 
   function note(t) { sumEl.textContent = t; }
@@ -275,7 +288,7 @@ MAP_JS = r"""
     if (!map || !data) return;
     var f = currentFilter();
     layer.clearLayers();
-    var shown = [], units = {}, cnt = {}, remaining = 0, premium = {};
+    var shown = [], units = {}, cnt = {}, remaining = 0, premium = {}, srcCnt = {};
     var list = [];
     data.sites.forEach(function (s) { expand(s).forEach(function (x) { list.push(x); }); });
     list.forEach(function (s) {
@@ -292,7 +305,9 @@ MAP_JS = r"""
       units[s.status] = (units[s.status] || 0) + u;
       if (s.sale) remaining += s.sale.remaining;
       if (s.premium_m) premium[s.status] = (premium[s.status] || 0) + s.premium_m;
+      srcCnt[s.source] = (srcCnt[s.source] || 0) + 1;
     });
+    drawLegend(srcCnt);
     // 大的先画在下面，小的在上面，免得被盖住点不到
     shown.sort(function (a, b) { return radius(b) - radius(a); });
     shown.forEach(function (s) {
@@ -351,15 +366,7 @@ MAP_JS = r"""
     layer = L.layerGroup().addTo(map);
 
     var legend = L.control({ position: 'bottomleft' });
-    legend.onAdd = function () {
-      var d = L.DomUtil.create('div', 'map-legend');
-      d.innerHTML = SRC_ORDER.filter(function (k) { return k !== '未知'; }).map(function (k) {
-        return '<div><i style="background:' + SRC_COLOR[k] + '"></i>' + k + '</div>';
-      }).join('') +
-        '<div class="st"><i style="background:#334155"></i>实心 在售 &nbsp; <i style="background:#334155;border:2px solid #111"></i>黑边 已批预售未开售<br>' +
-        '<i style="border:2px dashed #334155;background:#33415588"></i>虚边 动工未预售 &nbsp; <i style="border:2px solid #334155"></i>空心 已批地未开上盖（大小按面积）</div>';
-      return d;
-    };
+    legend.onAdd = function () { legendEl = L.DomUtil.create('div', 'map-legend'); return legendEl; };
     legend.addTo(map);
 
     fetch('land_chain.json', { cache: 'no-cache' })
