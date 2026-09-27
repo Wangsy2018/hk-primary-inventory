@@ -835,11 +835,58 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
 _STREET = re.compile(r"(?:NO\.?\s*)?(\d+[A-Z]?)\s+([A-Z'’ ]+?\s(?:ROAD|STREET|LANE|AVENUE|PATH|TERRACE|DRIVE|WAY|CIRCUIT|CRESCENT|SQUARE|VILLAS?|GARDENS?|PLACE|HILL|BAY))\b")
 
 
-def addr_key(text) -> str:
+def _addr_norm(text) -> str:
     t = str(text or "").upper().replace(",", " ")
-    t = re.sub(r"\bRD\b\.?", "ROAD", t); t = re.sub(r"\bST\b\.?", "STREET", t); t = re.sub(r"\bAVE\b\.?", "AVENUE", t)
-    m = _STREET.search(t)
+    return re.sub(r"\bAVE\b\.?", "AVENUE", re.sub(r"\bST\b\.?", "STREET", re.sub(r"\bRD\b\.?", "ROAD", t)))
+
+
+def addr_key(text) -> str:
+    """'No. 8 Castle Road, Mid-Levels' / '8 CASTLE RD' -> '8 CASTLE ROAD'"""
+    m = _STREET.search(_addr_norm(text))
     return f"{m.group(1)} {re.sub(r'[^A-Z ]', '', m.group(2)).strip()}" if m else ""
+
+
+_SUFFIX = r"(?:ROAD|STREET|LANE|AVENUE|PATH|TERRACE|DRIVE|WAY|CIRCUIT|CRESCENT|SQUARE|VILLAS?|GARDENS?|PLACE|HILL|BAY)"
+_SPAN = re.compile(r"(?:NOS?\.?\s*)?((?:\d+[A-Z]?)(?:\s*(?:[-–—&,]|AND)\s*\d+[A-Z]?)*)\s+([A-Z'’ ]+?\s" + _SUFFIX + r")\b")
+
+
+def addr_spans(text) -> list[tuple[str, int, int]]:
+    """把地址拆成「街名 + 门牌区间」，一条地址可能有好几段。
+
+    '26-40A Whampoa Street, 83-85 Baker Street' -> [('WHAMPOA STREET',26,40), ('BAKER STREET',83,85)]
+    '16 and 18 Cape Road' -> [('CAPE ROAD',16,18)]，'No. 8 Castle Road' -> [('CASTLE ROAD',8,8)]
+
+    屋宇署地盘的地址常写成门牌范围（'62-76 Main Street'），SRPE 写具体门牌（'68 Main St'），
+    只比首尾号码会错过，落在区间内才是同一块地。
+    """
+    out = []
+    for m in _SPAN.finditer(_addr_norm(text)):
+        nums = [int(x) for x in re.findall(r"\d+", m.group(1))]
+        if not nums:
+            continue
+        street = re.sub(r"[^A-Z ]", "", m.group(2)).strip()
+        out.append((street, min(nums), max(nums)))
+    return out
+
+
+def addr_overlap(a, b) -> bool:
+    """两条地址是否指同一块地：同一条街，且门牌区间有交集。"""
+    sa, sb = addr_spans(a), addr_spans(b)
+    for st1, lo1, hi1 in sa:
+        for st2, lo2, hi2 in sb:
+            if st1 == st2 and lo1 <= hi2 and lo2 <= hi1:
+                return True
+    return False
+
+
+def street_key(text) -> str:
+    """只取街名，不要门牌：'62-76 Main Street Ap Lei Chau' / '68 MAIN ST' -> 'MAIN STREET'。
+
+    屋宇署的地盘只有一串地址、没有项目名，门牌又常是 '62-76' 这种范围，
+    对不上具体门牌，只能靠街名 + 距离。
+    """
+    m = _STREET.search(_addr_norm(text))
+    return re.sub(r"[^A-Z ]", "", m.group(2)).strip() if m else ""
 
 
 def name_key(text) -> str:
@@ -848,6 +895,14 @@ def name_key(text) -> str:
     t = re.sub(r"\bPHASE\s*[\w-]+\b|\bSERIES\b|\bDEVELOPMENT\b|\bPENDING\b|\bTOWERS?\b", " ", t)
     t = re.sub(r"\b(I{1,3}|IV|VI{0,3}|IX|X{1,3}|[0-9]+[A-Z]?)\b$", " ", t.strip())
     return re.sub(r"[^A-Z]", "", t)
+
+
+_ADDRESSY = re.compile(r"\d.*\b" + _SUFFIX + r"\b|\b" + _SUFFIX + r"\b.*\d")
+
+
+def looks_like_address(text) -> bool:
+    """'15 Gough Hill Road' 这种「名字」其实是地址 —— 去掉数字后两个不同门牌会撞成同一个 key。"""
+    return bool(_ADDRESSY.search(str(text or "").upper()))
 
 
 def name_keys(text) -> set:
@@ -1019,23 +1074,49 @@ def attach_srpe_projects(sites: list[dict]) -> int:
     for s in sites:
         s["projects"] = []
     lat = np.array([s["lat"] for s in sites]); lon = np.array([s["lon"] for s in sites])
+
+    def site_names(s: dict) -> set:
+        out = set()
+        for ph in s.get("phases", []):
+            for k in ("name", "name_en"):
+                v = str(ph.get(k) or "")
+                if v and v not in ("待定", "Pending", "nan") and not looks_like_address(v):
+                    out.add(v)
+        for k in ("name", "name_en"):
+            if s.get(k) and not looks_like_address(s[k]):
+                out.add(str(s[k]))
+        return out
+
     n = 0
     for _, r in idx.iterrows():
         d = haversine(r.lat, r.lon, lat, lon)
         ak = addr_key(r.address_en)
-        zh = str(r.name_zh or "")
-        nm = name_keys(r.name_en)
+        zh = "" if pd.isna(r.name_zh) else str(r.name_zh).strip()
+        en = "" if pd.isna(r.name_en) else str(r.name_en).strip()
+        nm = set() if looks_like_address(en) else name_keys(en)
+        tok = phase_token(r.phase) or phase_token(en)
         best = None
-        for si in np.where(d <= 800)[0]:
+        # 按可靠程度排：门牌+街名 > 项目名 > 期数标签 > 同街很近
+        # 只靠「几百米内」会把隔壁盘也吸进来（安達臣道的安峯 / 峻然 / 灝然是三个不同的盘）
+        for si in np.where(d <= 1500)[0]:
             s = sites[si]
             if s.get("no_presale"):
                 continue
-            names = set(name_keys(s.get("name_en") or ""))
-            for ph in s.get("phases", []):
-                names |= name_keys(ph.get("name_en") or "")
-            strong = (ak and ak == addr_key(s.get("address_en"))) or (zh and zh in s["name"])
-            prio = 0 if strong else (1 if (nm & names) else 2)
-            if prio == 2 and d[si] > 150:
+            names = site_names(s)
+            if ak and addr_key(s.get("address_en")) == ak:
+                prio = 0                      # 门牌 + 街名完全一致
+            elif (zh and any(zh in x for x in names)) or (nm and any(nm & name_keys(x) for x in names)):
+                prio = 1                      # 项目名一致
+            elif tok and d[si] <= 300 and any(phase_token(ph.get("name")) == tok
+                                              or phase_token(ph.get("name_en")) == tok for ph in s.get("phases", [])):
+                prio = 2                      # 期数标签一致
+            elif d[si] <= 120 and (addr_overlap(r.address_en, s.get("address_en"))
+                                   or addr_overlap(r.address_en, s.get("name"))):
+                # 同一条街、门牌落在地盘地址的区间内。屋宇署地盘只有地址没有项目名，只能靠这条；
+                # 但一个地址区间里可能站着两个不同的盘（26-40A 黃埔街同时有映匯和 BAKER CIRCLE），
+                # 所以只在这个地盘还没有别的名字时才认。
+                prio = 3
+            else:
                 continue
             if best is None or (prio, d[si]) < best[0]:
                 best = ((prio, d[si]), int(si))
@@ -1049,7 +1130,7 @@ def attach_srpe_projects(sites: list[dict]) -> int:
                 units = int(ph["units"]); break
         sold = pd.to_numeric(r.get("sold"), errors="coerce")
         s["projects"].append({
-            "devId": str(r.devId), "name": zh or str(r.name_en or ""), "name_en": str(r.name_en or ""),
+            "_prio": best[0][0], "devId": str(r.devId), "name": zh or str(r.name_en or ""), "name_en": str(r.name_en or ""),
             "phase": "" if pd.isna(r.phase) else str(r.phase), "token": tok,
             "lat": round(float(r.lat), 6), "lon": round(float(r.lon), 6),
             "units": units, "sold": None if pd.isna(sold) else int(sold),
@@ -1057,7 +1138,21 @@ def attach_srpe_projects(sites: list[dict]) -> int:
             "last_pasp": "" if pd.isna(r.get("last_pasp")) else str(r.get("last_pasp"))[:10],
         })
         n += 1
+    # 一个地盘上如果挂着名字不同的盘，多半是弱匹配把隔壁盘吸了进来
+    # （親海駅 与 擎海 都在同源街、期数都叫「第1期」）。只留证据最硬的那一组。
+    dropped = 0
     for s in sites:
+        ps = s.get("projects") or []
+        groups: dict[str, list] = {}
+        for p in ps:
+            groups.setdefault(re.sub(r"[\s·．・]", "", (p["name"] or p["name_en"] or "").upper()), []).append(p)
+        if len(groups) > 1:
+            keep = min(groups.values(), key=lambda g: (min(x["_prio"] for x in g), -len(g)))
+            dropped += len(ps) - len(keep)
+            s["projects"] = keep
+    for s in sites:
+        for p in s["projects"]:
+            p.pop("_prio", None)
         ps = s.get("projects") or []
         # 整个地盘只有一个发展项目：期数怎么写都无所谓，伙数就是地盘的
         if len(ps) == 1 and ps[0]["units"] is None and s.get("presale_units"):
@@ -1071,6 +1166,7 @@ def attach_srpe_projects(sites: list[dict]) -> int:
             if len(miss) == 1 and len(free) == 1:
                 miss[0]["units"] = int(free[0]["units"])
         ps.sort(key=lambda p: (p["first_print"] or "9999", p["phase"]))
+    n -= dropped
     multi = sum(1 for s in sites if len(s.get("projects") or []) > 1)
     matched_units = sum(1 for s in sites for p in s["projects"] if p["units"] is not None)
     print(f"  [land_chain] SRPE 名册 {len(idx)} 个发展项目 -> 挂上 {n} 个；"
