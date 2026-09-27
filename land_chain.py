@@ -298,6 +298,8 @@ def phase_token(text) -> str:
     '西沙灣發展項目 (第1A(2)期)' -> '1A(2)'
     """
     t = re.sub(r"\s+", " ", str(text or "")).strip().upper()
+    # 官方偶尔把罗马数字打散：「第 VII I 期」其实是第八期，不合回去会读成第七期
+    t = re.sub(r"(?<=[IVXLC])\s+(?=[IVXLC]\b|[IVXLC][^A-Z])", "", t)
     for zh, ar in _PHASE_CN.items():          # 第一期 / 第二期 …
         t = t.replace(f"第{zh}期", f"第{ar}期").replace(f"第 {zh} 期", f"第{ar}期")
     # 后缀字母必须紧跟数字且后面不再是字母，否则 'PHASE 1 OF THE HENLEY' 会被读成 '1O'
@@ -305,7 +307,10 @@ def phase_token(text) -> str:
          or re.search(r"第\s*([IVXLC]+|\d+)\s*([A-Z](?![A-Z]))?\s*(\(\d+\))?\s*期", t)
          or re.fullmatch(r"([IVXLC]+|\d+)\s*([A-Z](?![A-Z]))?\s*(\(\d+\))?", t))
     if not m:
-        return ""
+        # 也有用字母当期号的（The YOHO Hub 的第 B 期 / 第 C 期）
+        m2 = (re.search(r"PHASE\s*([A-Z])(?![A-Z])", t) or re.search(r"第\s*([A-Z])\s*期", t)
+              or re.fullmatch(r"([A-Z])", t))
+        return f"#{m2.group(1)}" if m2 else ""
     head, suffix, paren = m.group(1), m.group(2) or "", m.group(3) or ""
     if head.isdigit():
         num = int(head)
@@ -317,7 +322,9 @@ def phase_token(text) -> str:
                 num, suffix = _PHASE_ROMAN[k], head[len(k):] + suffix
                 break
         if num is None:
-            return ""
+            return f"#{head}{suffix}" if len(head) == 1 else ""
+    if num > 200:
+        return ""                             # 期号不会是 2025 这种，多半扫到了年份
     return f"{num}{suffix}{paren}"
 
 
@@ -1125,9 +1132,12 @@ def attach_srpe_projects(sites: list[dict]) -> int:
         s = sites[best[1]]
         tok = phase_token(r.phase) or phase_token(r.name_en)
         units = None
-        for ph in s.get("phases", []):
-            if tok and phase_token(ph.get("name")) == tok or (tok and phase_token(ph.get("name_en")) == tok):
-                units = int(ph["units"]); break
+        claimed = s.setdefault("_claimed", set()) if isinstance(s.get("_claimed"), set) else s.setdefault("_claimed", set())
+        for k, ph in enumerate(s.get("phases", [])):
+            if k in claimed:
+                continue                      # 一个预售期只能算一次，否则伙数会翻倍
+            if tok and (phase_token(ph.get("name")) == tok or phase_token(ph.get("name_en")) == tok):
+                units = int(ph["units"]); claimed.add(k); break
         sold = pd.to_numeric(r.get("sold"), errors="coerce")
         s["projects"].append({
             "_prio": best[0][0], "devId": str(r.devId), "name": zh or str(r.name_en or ""), "name_en": str(r.name_en or ""),
@@ -1156,22 +1166,110 @@ def attach_srpe_projects(sites: list[dict]) -> int:
         ps = s.get("projects") or []
         # 整个地盘只有一个发展项目：期数怎么写都无所谓，伙数就是地盘的
         if len(ps) == 1 and ps[0]["units"] is None and s.get("presale_units"):
-            ps[0]["units"] = int(s["presale_units"])
+            ps[0]["units"] = int(s["presale_units"])          # 整个地盘就这一个发展项目
+            s["_claimed"] = set(range(len(s.get("phases", []))))   # 全部预售期都算进去了，别再补一遍
         # 多期但只剩一期没对上、也只剩一期预售没被认领：按剩余配对
         elif len(ps) > 1:
             miss = [p for p in ps if p["units"] is None]
             claimed = {p["token"] for p in ps if p["units"] is not None and p["token"]}
             free = [ph for ph in s.get("phases", []) if phase_token(ph.get("name")) not in claimed
                     and phase_token(ph.get("name_en")) not in claimed]
-            if len(miss) == 1 and len(free) == 1:
+            if len(miss) == 1 and len(free) == 1 and miss[0].get("token"):
                 miss[0]["units"] = int(free[0]["units"])
+                for k, ph in enumerate(s.get("phases", [])):
+                    if ph is free[0]:
+                        s.setdefault("_claimed", set()).add(k)
         ps.sort(key=lambda p: (p["first_print"] or "9999", p["phase"]))
+    build_packages(sites)
     n -= dropped
-    multi = sum(1 for s in sites if len(s.get("projects") or []) > 1)
+    multi = sum(1 for s in sites if len(s.get("packages") or []) > 1)
     matched_units = sum(1 for s in sites for p in s["projects"] if p["units"] is not None)
     print(f"  [land_chain] SRPE 名册 {len(idx)} 个发展项目 -> 挂上 {n} 个；"
-          f"{multi} 个地盘含多期，其中 {matched_units}/{n} 期对上了预售伙数")
+          f"{multi} 个地盘含多个项目（{sum(len(s.get('packages') or []) for s in sites)} 个项目 / "
+          f"{sum(len(p['subs']) for s in sites for p in (s.get('packages') or []))} 个子期），"
+          f"其中 {matched_units}/{n} 个子期对上了预售伙数")
     return n
+
+
+def build_packages(sites: list[dict]) -> None:
+    """把 SRPE 的子期归并成「项目」这一层。
+
+    日出康城实际是 13 个项目，其中第 IX 期又分 A/B/C、第 XIII 期分 A/B —— 地图上应该一个
+    项目一个点（不是整个日出康城一个点，也不是拆到 A/B），点开再看子期。
+    归并的键是期数标签的数字部分：13A / 13B -> 第 13 期。
+    """
+    for s in sites:
+        groups: dict[str, list] = {}
+        for p in s.get("projects") or []:
+            tok = p.get("token") or ""
+            m = re.match(r"(\d+)", tok)
+            groups.setdefault(m.group(1) if m else (tok or p["devId"]), []).append(p)
+        packs = []
+        for key, subs in groups.items():
+            subs.sort(key=lambda x: (x["first_print"] or "9999", x["phase"]))
+            first = subs[0]
+            # 「PHASE XIIIA」去掉子期字母就是项目名「PHASE XIII」
+            label = re.sub(r"\s*\(\d+\)\s*$", "", str(first.get("phase") or "")).strip()
+            tok = first.get("token") or ""
+            if label and re.match(r"\d+[A-Z]$", tok) and label[-1:].isalpha() and len(label) > 1:
+                label = label[:-1].strip()
+            units = [x["units"] for x in subs if x["units"] is not None]
+            solds = [x["sold"] for x in subs if x["sold"] is not None]
+            packs.append({
+                "key": key, "label": label, "name": first["name"], "name_en": first["name_en"],
+                "lat": round(sum(x["lat"] for x in subs) / len(subs), 6),
+                "lon": round(sum(x["lon"] for x in subs) / len(subs), 6),
+                "units": sum(units) if len(units) == len(subs) else (sum(units) or None),
+                "units_partial": len(units) != len(subs),
+                "sold": sum(solds) if solds else None,
+                "active": "Y" if any(x["active"] == "Y" for x in subs) else "N",
+                "first_print": min((x["first_print"] for x in subs if x["first_print"]), default=""),
+                "last_pasp": max((x["last_pasp"] for x in subs if x["last_pasp"]), default=""),
+                "subs": subs,
+            })
+        # SRPE 只登记还在册的；卖完超过 18 个月就下架了（日出康城第一、二、三、VI、VIII 期）。
+        # 这些期在预售同意书里还有，补成「已售罄」的项目，整盘的期数才是完整的。
+        claimed = s.pop("_claimed", set())
+        by_key = {p["key"]: p for p in packs}
+        for k, ph in enumerate(s.get("phases", [])):
+            if k in claimed:
+                continue
+            tok = phase_token(ph.get("name")) or phase_token(ph.get("name_en"))
+            m = re.match(r"(\d+)", tok or "")
+            key = m.group(1) if m else (tok or "")
+            pk = by_key.get(key)
+            if not pk:
+                continue                      # 整个项目都没在册，下面按项目补
+            pk["subs"].append({"devId": "", "phase": str(ph.get("name") or ""), "name": pk["name"],
+                               "name_en": pk["name_en"], "token": tok or "", "lat": pk["lat"], "lon": pk["lon"],
+                               "units": int(ph["units"]), "sold": None, "active": "N", "off_register": True,
+                               "first_print": ph["ym"], "last_pasp": ""})
+            pk["units"] = (pk["units"] or 0) + int(ph["units"])
+            claimed.add(k)
+        covered = {p["key"] for p in packs}
+        old_groups: dict[str, list] = {}
+        for k, ph in enumerate(s.get("phases", [])):
+            tok = phase_token(ph.get("name")) or phase_token(ph.get("name_en"))
+            m = re.match(r"(\d+)", tok or "")
+            key = m.group(1) if m else (tok or "")
+            if not key or key in covered or k in claimed:
+                continue
+            old_groups.setdefault(key, []).append(ph)
+        for key, phs in old_groups.items():
+            phs.sort(key=lambda x: x["ym"])
+            packs.append({
+                "key": key, "label": f"第 {key.lstrip('#')} 期", "name": s["name"], "name_en": s.get("name_en") or "",
+                "lat": s["lat"], "lon": s["lon"],
+                "units": sum(int(x["units"]) for x in phs), "units_partial": False,
+                "sold": None, "active": "N", "off_register": True,
+                "first_print": phs[0]["ym"], "last_pasp": "",
+                "subs": [{"devId": "", "phase": x["name"], "name": x["name"], "name_en": x.get("name_en") or "",
+                          "token": phase_token(x.get("name")) or "", "lat": s["lat"], "lon": s["lon"],
+                          "units": int(x["units"]), "sold": None, "active": "N",
+                          "first_print": x["ym"], "last_pasp": ""} for x in phs],
+            })
+        packs.sort(key=lambda x: (x["first_print"] or "9999", x["label"]))
+        s["packages"] = packs
 
 
 def attach_sales(sites: list[dict], house730_csv: Path | None) -> pd.DataFrame | None:
