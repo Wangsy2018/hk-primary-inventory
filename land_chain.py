@@ -252,8 +252,6 @@ def owner_of(vendor: str) -> str:
         return "房委会"
     if re.search(r"\bMTR CORP", v):
         return "港铁"
-    if "HONG KONG RESORT" in v:
-        return "愉景湾"
     return "私人"
 
 
@@ -512,7 +510,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
         "address": lambda d: d.address.iloc[-1],
         "address_zh": lambda d: d.address_zh.iloc[-1],
         "vendor": lambda d: d.vendor.iloc[-1],
-        "owner": lambda d: next(o for o in ("港铁", "市建局", "房協", "房委会", "愉景湾", "私人") if o in set(d.owner)),
+        "owner": lambda d: next(o for o in ("港铁", "市建局", "房協", "房委会", "私人") if o in set(d.owner)),
         "ap": lambda d: d.ap.iloc[-1],
         "phases": lambda d: [{"name": r.name_zh or r.name_en, "name_en": r.name_en, "ym": r.ym, "units": int(r.units)}
                              for r in d.sort_values("ym").itertuples()],
@@ -521,7 +519,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
         "units": lambda d: int(max(d[d.table == "5.4"].units.sum(), d[d.table == "5.5"].units.sum())),
         "address": lambda d: d.sort_values("units", ascending=False).address.iloc[0], "applicant": lambda d: d.applicant.iloc[-1],
         "btype": lambda d: d.btype.iloc[-1], "ap": lambda d: d.ap.iloc[-1],
-        "owner": lambda d: next(o for o in ("港铁", "市建局", "房協", "房委会", "愉景湾", "私人") if o in set(d.owner)),
+        "owner": lambda d: next(o for o in ("港铁", "市建局", "房協", "房委会", "私人") if o in set(d.owner)),
         "app_n": lambda d: norm_co(d.applicant.iloc[-1]),
         "cos": lambda d: frozenset().union(*d.applicant.map(company_keys)),
     })
@@ -676,7 +674,7 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
         kinds = {r["kind"].split("(")[0] for r in recs}
         if owner == "港铁":
             return "港铁上盖"
-        if owner in ("市建局", "愉景湾"):
+        if owner == "市建局":
             return owner
         if "卖地" in kinds:
             return "公开卖地"
@@ -1040,7 +1038,7 @@ def add_unmatched_sales(sites: list[dict], miss: pd.DataFrame | None) -> int:
             "name": name_zh or str(r.get("project") or ""), "name_en": str(r.get("project") or ""),
             "phases": [], "address": addr_zh or str(r.get("address") or ""),
             "address_en": str(r.get("address") or ""), "owner": "私人", "vendor": "",
-            "source": "未知", "land": [], "no_presale": True, "srpe_ids": dev_ids,
+            "source": "无批地记录", "land": [], "no_presale": True, "srpe_ids": dev_ids,
             "presale_units": 0, "presale_first": "", "presale_last": "",
             "plan_ym": "", "start_ym": "", "bd_units": total or None, "bd_sites": 0,
             "op_ym": "", "op_units": 0, "ap": "", "applicant": str(r.get("main_developer") or ""),
