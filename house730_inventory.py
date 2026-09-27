@@ -35,6 +35,26 @@ DEFAULT_OUT = PROJECT_DIR / "out_inventory" / "projects_inventory.csv"
 # 每天只补：本地没有的期数 + 还没开售的期数（它们随时可能开）。
 SALE_PROCESS_CSV = PROJECT_DIR / "data" / "history" / "house730_sale_process.csv"
 
+# house730 的一手盘列表里超过一半是海外和内地盘（英国 123、澳洲 93、加拿大 78、
+# 马来西亚 / 泰国 / 新加坡 / 日本 / 阿联酋 / 越南 / 韩国，以及中山、珠海各一个），
+# 我们只要香港。region 字段就是这四个值，其余（含 None）一律不要。
+HK_REGIONS = {"Hong Kong Island", "Kowloon", "New Territories East", "New Territories West"}
+# 第二道闸：坐标落在香港范围外的也不要（海外盘的坐标多是 0,0，region 万一改名也拦得住）
+HK_BBOX = (22.13, 22.60, 113.80, 114.50)      # lat_min, lat_max, lon_min, lon_max
+
+
+def in_hong_kong(e: dict) -> bool:
+    if (e.get("regionNameWithCulture") or "") not in HK_REGIONS:
+        return False
+    try:
+        lat, lon = float(e.get("latitudes")), float(e.get("longitudes"))
+    except (TypeError, ValueError):
+        return True                    # 没坐标就只信 region
+    if lat == 0 and lon == 0:
+        return False
+    return HK_BBOX[0] <= lat <= HK_BBOX[1] and HK_BBOX[2] <= lon <= HK_BBOX[3]
+
+
 # 只统计私人住宅市场：资助出售房屋不算市场货量。
 # 按 main developer 的原始字串做不区分大小写的子串匹配，要加就往这里加。
 EXCLUDED_DEVELOPERS = (
@@ -439,6 +459,12 @@ def main() -> None:
     for e in estates:
         e["estateId"] = str(e["estateId"])
         e["_addr_zh"] = zh.get(e["estateId"]) or zh.get(int(e["estateId"]))
+    overseas = [e for e in estates if not in_hong_kong(e)]
+    if overseas:
+        estates = [e for e in estates if in_hong_kong(e)]
+        import collections as _c
+        top = _c.Counter(e.get("regionNameWithCulture") or "中国内地" for e in overseas).most_common(4)
+        print(f"      剔除非香港盘 {len(overseas)} 期（" + "、".join(f"{k} {v}" for k, v in top) + " …）")
     dropped = [e for e in estates if is_excluded(e.get("mainDeveloperWithCulture"))]
     if dropped:
         estates = [e for e in estates if not is_excluded(e.get("mainDeveloperWithCulture"))]
@@ -462,7 +488,9 @@ def main() -> None:
         for e, pr in zip(todo, procs):
             cache[e["estateId"]] = (pr.get("First Sales Date"), pr.get("Estimated Material Date"))
         print(f"      {time.time() - t0:.0f}s")
-        save_sale_process_cache(SALE_PROCESS_CSV, cache)
+        # 只留还在列表里的期数，免得海外盘和下架盘在缓存里越攒越多
+        save_sale_process_cache(SALE_PROCESS_CSV, {k: v for k, v in cache.items()
+                                                   if k in {e["estateId"] for e in estates}})
     for e in estates:
         fs, emd = cache.get(e["estateId"], (None, None))
         e["_first_sale"], e["_emd"] = fs, emd

@@ -360,6 +360,13 @@ GET 即可，返回 `rawData`，其中 `ccl` 是周度指数值，`realContractE
 另一个写 `MTR，SINO，K.WAH & CHINA MERCHANTS`，差一个 LAND。阈值 0.6 是为了扛住康城路1號 ——
 那一个地址底下有 5 家不同发展商的盘，放宽到「同地址即合并」会全糊在一起。
 
+**只要香港盘**：house730 的一手列表 775 期里有 **441 期是海外 / 内地**（英国 123、澳洲 93、
+加拿大 78、马来西亚 43、泰国 43、新加坡 34、日本 13、阿联酋 6、越南 4、韩国 2，以及中山、
+珠海各一），靠 `regionNameWithCulture` 只留 Hong Kong Island / Kowloon / New Territories East /
+New Territories West 四个值，再用坐标落在香港范围内兜一道（海外盘坐标多是 0,0）。
+这些盘本来就没有销售进度和单位表、进不到结果里，但先滤掉能把单位表请求从 771 次降到 330 次，
+跑完从 2 分 42 秒降到 54 秒，也少一半被限流封禁的机会。
+
 **只放已开售项目**：项目里任何一期有 First Sales Date **或单位表里已有售出** 即算已开售。
 只看日期会漏掉一批盘 —— house730 对现楼盘常常不填 First Sales Date，但单位表里早就在卖了
 （天御、The Horizon、ST. Barths 这类，33 个项目、3,697 伙货量、2,311 伙已售）。
