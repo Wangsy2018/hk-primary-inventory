@@ -503,7 +503,7 @@ def build_dashboard_html(dirpath: Path) -> str:
       <div class="ov__body"><table class="pl">
         <thead><tr>
           <th data-k="name">项目</th>
-          <th data-k="total" class="num">总货量</th>
+          <th data-k="total" class="num">已推出</th>
           <th data-k="sold" class="num">已售</th>
           <th data-k="left" class="num">余货</th>
           <th data-k="pct" class="num">余货占比</th>
@@ -868,7 +868,7 @@ def build_dashboard_html(dirpath: Path) -> str:
   mountOverlay({{
     ov: 'ov', kpi: 'kpi-market', data: D.projects, sortKey: 'left',
     textCols: ['name', 'first', 'emd', 'developer'],
-    summary: D.market.projects + ' 个项目 / ' + D.market.phases + ' 期 · 总货量 '
+    summary: D.market.projects + ' 个项目 / ' + D.market.phases + ' 期 · 已推出 '
       + num(D.market.total) + ' · 已售 ' + num(D.market.sold)
       + ' · 余货 ' + num(D.market.remaining) + ' 伙',
     searchText: function (p) {{ return p.name + ' ' + p.developer + ' ' + p.address + ' ' + p.phase_names; }},

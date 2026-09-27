@@ -360,7 +360,10 @@ GET 即可，返回 `rawData`，其中 `ccl` 是周度指数值，`realContractE
 另一个写 `MTR，SINO，K.WAH & CHINA MERCHANTS`，差一个 LAND。阈值 0.6 是为了扛住康城路1號 ——
 那一个地址底下有 5 家不同发展商的盘，放宽到「同地址即合并」会全糊在一起。
 
-**只放已开售项目**：项目里任何一期有 First Sales Date 即算已开售；市场余货加总也只算这些项目。
+**只放已开售项目**：项目里任何一期有 First Sales Date **或单位表里已有售出** 即算已开售。
+只看日期会漏掉一批盘 —— house730 对现楼盘常常不填 First Sales Date，但单位表里早就在卖了
+（天御、The Horizon、ST. Barths 这类，33 个项目、3,697 伙货量、2,311 伙已售）。
+所以单位表要全部期数都拉，不能只拉「已开售」项目的。
 
 **只统计私人住宅市场**：资助出售房屋不算市场货量，按 main developer 剔除，
 名单在 `EXCLUDED_DEVELOPERS`（目前只有房協 `HONG KONG HOUSING SOCIETY`，

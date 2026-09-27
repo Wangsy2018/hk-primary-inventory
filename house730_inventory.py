@@ -468,19 +468,24 @@ def main() -> None:
         e["_first_sale"], e["_emd"] = fs, emd
 
     groups = build_projects(estates)
-    # 任何一期开售 -> 整个项目算已开售
-    launched = [v for v in groups if any(e.get("_first_sale") for e in v.phases)]
-    print(f"      {len(estates)} 个期数 -> {len(groups)} 个项目，其中已开售 {len(launched)} 个")
-
-    need = [e for v in launched for e in v.phases]
-    print(f"[3/4] 拉取已开售项目各期单位状态（{len(need)} 期）…")
+    # 单位表要全部期数都拉：有些盘（多为现楼）house730 没填 First Sales Date，
+    # 但单位表里已经有售出记录，只看日期会把整个项目丢掉
+    print(f"[3/4] 拉取全部期数单位状态（{len(estates)} 期）…")
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        units = list(ex.map(lambda e: fetch_units(s, e["estateId"]), need))
-    for e, (tot, sold) in zip(need, units):
+        units = list(ex.map(lambda e: fetch_units(s, e["estateId"]), estates))
+    for e, (tot, sold) in zip(estates, units):
         e["_total"], e["_sold"] = tot, sold
-    empty = [e for e in need if not e["_total"]]
-    print(f"      {time.time() - t0:.0f}s；其中 {len(empty)} 期无单位表（未推出的期数，属正常）")
+    print(f"      {time.time() - t0:.0f}s")
+
+    # 已开售 = 有首次销售日期，或单位表里已经有售出
+    launched = [v for v in groups
+                if any(e.get("_first_sale") or e.get("_sold") for e in v.phases)]
+    by_sold = [v for v in launched if not any(e.get("_first_sale") for e in v.phases)]
+    print(f"      {len(estates)} 个期数 -> {len(groups)} 个项目，其中已开售 {len(launched)} 个"
+          f"（{len(by_sold)} 个无首次销售日期、靠已售单位认定）")
+    empty = [e for v in launched for e in v.phases if not e["_total"]]
+    print(f"      已开售项目里 {len(empty)} 期无单位表（未推出的期数，属正常）")
 
     print("[4/4] 合并汇总 …")
     rows = []
@@ -500,7 +505,9 @@ def main() -> None:
         remaining = total - sold
         fs = [e["_first_sale"] for e in ph if e.get("_first_sale")]
         emds = sorted({e["_emd"] for e in ph if e.get("_emd")})
-        first_sale = min(fs)
+        first_sale = min(fs) if fs else None       # 靠已售单位认定的盘没有日期
+        lats = [float(e["latitudes"]) for e in ph if e.get("latitudes")]
+        lons = [float(e["longitudes"]) for e in ph if e.get("longitudes")]
         rows.append({
             "project": display or "(未命名)",
             "phases": len(ph),
@@ -511,8 +518,11 @@ def main() -> None:
             "sold_units": sold,
             "remaining_units": remaining,
             "remaining_pct": round(remaining / total * 100, 1) if total else None,
-            "first_sales_date": first_sale.isoformat(),
-            "months_since_launch": months_between(first_sale, today),
+            "first_sales_date": first_sale.isoformat() if first_sale else "",
+            "months_since_launch": months_between(first_sale, today) if first_sale else None,
+            # 坐标用来和地政总署 / 屋宇署的地盘对位，光靠门牌会撞车
+            "lat": round(sum(lats) / len(lats), 6) if lats else None,
+            "lon": round(sum(lons) / len(lons), 6) if lons else None,
             "estimated_material_date": (
                 emds[0].isoformat() if len(emds) == 1
                 else (f"{emds[0].isoformat()} ~ {emds[-1].isoformat()}" if emds else "")
@@ -520,6 +530,7 @@ def main() -> None:
         })
 
     df = pd.DataFrame(rows).sort_values("remaining_units", ascending=False).reset_index(drop=True)
+    df["first_sales_date"] = df["first_sales_date"].fillna("")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False, encoding="utf-8-sig")

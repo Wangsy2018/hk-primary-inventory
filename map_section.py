@@ -76,7 +76,7 @@ MAP_HTML = """
     圆点大小默认按总伙数，只勾「在售」时自动改按 house730 余货（也可手动切）；颜色是土地来源：<b>公开卖地</b>（地政总署卖地记录）、<b>换地 / 契约修订补地价</b>（已签立换地、契约修订记录）、
     <b>港铁上盖</b>（预售卖方为港铁 / 九铁物业公司）、<b>市建局</b>、<b>房協</b>。实心 = 在售（house730 有余货）；黑边 = 已批预售但 house730 未见开售；
     虚边 = 屋宇署已发施工同意书但未批预售；空心 = 已批地（政府卖地 / 换地补价）但屋宇署未发上盖施工同意书，大小按地盘面积；淡色 = 已售罄 / 已入伙。各图层之间没有共同编号，靠坐标（30 米内）和地段号对上，大型屋苑一个点对应多个屋宇署地盘，
-    伙数以预售同意书为准、屋宇署数字作参考；少数记录官方坐标有误已剔除。点圆点看这块地从批地到入伙的每一步。
+    「预售批出」是全盘已批的伙数，「已推出」是 house730 收录到单位表的期数，两者差额即已批未推出；现楼盘没有预售同意书，用 house730 坐标单独落点。少数记录官方坐标有误已剔除。点圆点看这块地从批地到入伙的每一步。
   </div>
 """
 
@@ -151,10 +151,11 @@ MAP_JS = r"""
     if (s.stage === '批地未动工') h += '<tr><td>上盖</td><td style="color:#94a3b8">屋宇署未发上盖施工同意书</td></tr>';
     if (s.start_ym) h += '<tr><td>动工</td><td>' + esc(s.start_ym) + (s.bd_units != null ? ' · <b>' + fmtUnits(s.bd_units) + '</b> 伙' : '') +
       (s.bd_sites > 1 ? '（' + s.bd_sites + ' 个屋宇署地盘）' : '') + '</td></tr>';
+    else if (s.no_presale) h += '<tr><td>来源</td><td style="color:#94a3b8">现楼销售：没有预售同意书，地政总署 / 屋宇署的链上接不到，落点用 house730 坐标</td></tr>';
     else if (s.stage !== '批地未动工') h += '<tr><td>动工</td><td style="color:#94a3b8">' + (s.bd_missing ? '屋宇署 5.4/5.5 未登记此盘（只有批则 / 入伙纸）' : '屋宇署无施工同意书记录') + '</td></tr>';
     if (s.presale_first) {
       var ph = s.presale_first === s.presale_last ? s.presale_first : s.presale_first + ' ~ ' + s.presale_last;
-      h += '<tr><td>预售</td><td>' + esc(ph) + ' · <b>' + fmtUnits(s.presale_units) + '</b> 伙';
+      h += '<tr><td>预售批出</td><td>' + esc(ph) + ' · <b>' + fmtUnits(s.presale_units) + '</b> 伙';
       if (s.phases && s.phases.length > 1) {
         h += '<details><summary>' + s.phases.length + ' 期明细</summary>';
         s.phases.forEach(function (p) { h += '<div>' + esc(p.ym) + ' · ' + esc(p.name) + ' · ' + fmtUnits(p.units) + ' 伙</div>'; });
@@ -163,8 +164,12 @@ MAP_JS = r"""
       h += '</td></tr>';
     }
     if (s.sale) {
+      // 已推出 = house730 收录到单位表的期数；和上面「预售批出」是两个口径，
+      // 差额就是批了预售还没开卖的期数，写清楚免得看着像两个互相矛盾的数
+      var gap = (s.presale_units || 0) - s.sale.total;
       h += '<tr><td>销售</td><td>' + (s.sale.first_sales ? '开售 ' + esc(s.sale.first_sales) + ' · ' : '') +
-        '已售 <b>' + fmtUnits(s.sale.sold) + '</b> / ' + fmtUnits(s.sale.total) + ' · 余 <b>' + fmtUnits(s.sale.remaining) + '</b> 伙' +
+        '已推出 <b>' + fmtUnits(s.sale.total) + '</b> 伙 · 已售 <b>' + fmtUnits(s.sale.sold) + '</b> · 余 <b>' + fmtUnits(s.sale.remaining) + '</b>' +
+        (gap > 0 ? '<br><span style="color:#94a3b8">另有 ' + fmtUnits(gap) + ' 伙已批预售、未推出</span>' : '') +
         '<br><span style="color:#94a3b8">house730：' + esc(s.sale.projects.join('、')) + '</span></td></tr>';
     }
     if (s.op_ym) h += '<tr><td>入伙</td><td>' + esc(s.op_ym) + ' · <b>' + fmtUnits(s.op_units) + '</b> 伙</td></tr>';

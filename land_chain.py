@@ -132,6 +132,7 @@ def canon_lots(text) -> frozenset:
     """
     t = re.sub(r"<br\s*/?>", " ", str(text or "")).upper()
     t = re.sub(r"\b((?:[A-Z]\.){2,})", lambda m: m.group(1).replace(".", ""), t)   # T.K.O.T.L. -> TKOTL
+    t = re.sub(r"\bMA\s+WAN\b", "MWL", t)          # 'MA WAN 392' 就是马湾地段
     out = set()
     # 丈量约份地段，两种语序都有；认出来后从文本里抹掉，免得被下面的规则误读
     dd = (r"LOT\s+(?:NO\.?\s*)?(\d+)\b[^,;]{0,40}?\bIN\s+(?:DEMARCATION\s+DISTRICT|DD)\s*(?:NO\.?)?\s*(\d+)",
@@ -152,8 +153,20 @@ def canon_lots(text) -> frozenset:
             abbr = "".join(w[0] for w in words[-4:]) + "L"
         if abbr:
             out.add(f"{abbr} {m.group(2)}")
-    for m in re.finditer(r"\b([A-Z]{2,6}L)\s+(\d{2,5})\b", t):
-        out.add(f"{_LOT_ALIAS.get(m.group(1), m.group(1))} {m.group(2)}")
+    # 已经是短码的写法。IL / ML 只有两个字母，单位数也可能只有一位（HSKTL 1），
+    # 所以放宽到 1~6 个字母 + 1~5 位数，再用官方短码表过滤，避免把随便一个 "L 3" 当成地段
+    for m in re.finditer(r"\b([A-Z]{1,6}L)\s+(\d{1,5})\b", t):
+        ab = _LOT_ALIAS.get(m.group(1), m.group(1))
+        if ab in _LOT_ABBR:
+            out.add(f"{ab} {m.group(2)}")
+    # 测量约份（Survey District）：'Lot 1074 in SD 3'
+    for m in re.finditer(r"LOT\s+(?:NO\.?\s*)?(\d+)\b[^,;]{0,40}?\bIN\s+(?:SURVEY\s+DISTRICT|SD)\s*(?:NO\.?)?\s*(\d+)", t):
+        out.add(f"SD{m.group(2)} LOT {m.group(1)}")
+    # 'Lots 724 & 726 in DD 332' —— 一条记录里多个地段共用一个约份号
+    m = re.search(r"LOTS\s+([\d\s&,and]+?)\s+IN\s+(?:DEMARCATION\s+DISTRICT|DD)\s*(?:NO\.?)?\s*(\d+)", t)
+    if m:
+        for num in re.findall(r"\d+", m.group(1)):
+            out.add(f"DD{m.group(2)} LOT {num}")
     return frozenset(out)
 
 
@@ -805,48 +818,153 @@ def name_keys(text) -> set:
     return {k for k in (name_key(x) for x in parts) if len(k) >= 4}
 
 
-def attach_sales(sites: list[dict], house730_csv: Path | None) -> None:
+def _match_house730(sites: list[dict], h: pd.DataFrame) -> set[int]:
+    """把 house730 的行挂到地盘上，返回用掉的行号。
+
+    只靠门牌 + 街名会撞车（黃金海灣和峻巒的地址都是「青山公路 18 号」，差 50 公里），
+    所以名字 / 地址对上之后还要坐标在 2 公里内；一个 house730 项目只认一个最近的地盘，
+    否则同一份余货会在地图上重复计好几次。
+    """
+    for c in ("lat", "lon"):
+        if c not in h:
+            h[c] = np.nan
+    h["lat"] = pd.to_numeric(h.lat, errors="coerce")
+    h["lon"] = pd.to_numeric(h.lon, errors="coerce")
+    by_name: dict[str, set] = {}
+    by_addr: dict[str, set] = {}
+    for i, r in h.iterrows():
+        for nm in str(r.get("phase_names") or "").split("|") + [str(r.get("project") or "")]:
+            for k in name_keys(nm):
+                by_name.setdefault(k, set()).add(i)
+        ak = addr_key(r.get("address"))
+        if ak:
+            by_addr.setdefault(ak, set()).add(i)
+
+    MAX_KM = 2.0
+    cand: dict[int, list[tuple[int, float, int]]] = {}      # house730 行 -> [(优先级, 距离, 地盘序号)]
+    # house730 的坐标偶有错得离谱的（首岸标到中环去了），所以距离只在需要分辨同名同门牌时才当否决
+    for si, s in enumerate(sites):
+        if not s["stage"].startswith("已预售"):
+            continue
+        hits: dict[int, int] = {}
+        ak = addr_key(s.get("address_en"))
+        for i in (by_addr.get(ak, set()) if ak else set()):
+            hits[i] = 0
+        names = set(name_keys(s.get("name_en")))
+        for ph in s.get("phases", []):
+            names |= name_keys(ph.get("name_en") or "")
+        for k in names:
+            for i in by_name.get(k, set()):
+                hits.setdefault(i, 1)
+        for i, prio in hits.items():
+            lat, lon = h.lat[i], h.lon[i]
+            d = haversine(s["lat"], s["lon"], lat, lon) / 1000 if pd.notna(lat) else np.nan
+            cand.setdefault(i, []).append((prio, 1e9 if pd.isna(d) else d, si))
+
+    pick: dict[int, list[int]] = {}       # 地盘序号 -> [house730 行]
+    for i, lst in cand.items():
+        addr = sorted(x for x in lst if x[0] == 0)
+        if len(addr) == 1:
+            best = addr[0]                # 门牌 + 街名唯一命中，坐标错了也认（house730 有错标）
+        elif addr:
+            best = addr[0]                # 同一门牌多个地盘（青山公路 18 号），近者胜
+        else:
+            near = sorted(x for x in lst if x[1] <= MAX_KM)
+            if not near:
+                continue                  # 只靠名字、又隔着十万八千里，不认
+            best = near[0]
+        pick.setdefault(best[2], []).append(i)
+    used: set[int] = set()
+    for si, idxs in pick.items():
+        sub = h.loc[sorted(idxs)]
+        used |= set(idxs)
+        fs = [str(x) for x in sub.first_sales_date if pd.notna(x) and str(x) not in ("nan", "NaT", "")]
+        sites[si]["sale"] = {
+            "projects": [str(x) for x in sub.project],
+            "total": int(pd.to_numeric(sub.total_units, errors="coerce").fillna(0).sum()),
+            "sold": int(pd.to_numeric(sub.sold_units, errors="coerce").fillna(0).sum()),
+            "remaining": int(pd.to_numeric(sub.remaining_units, errors="coerce").fillna(0).sum()),
+            "first_sales": min(fs) if fs else "",
+        }
+    return used
+
+
+SRPE_INDEX = Path(__file__).resolve().parent / "data" / "srpe" / "index.csv"
+
+
+def add_unmatched_sales(sites: list[dict], miss: pd.DataFrame | None) -> int:
+    """house730 有余货、但链上没有地盘的项目，单独补成地图上的点。
+
+    多数是现楼销售：楼建好了才卖，不需要预售同意书，所以地政总署的预售图层里根本没有，
+    链上自然接不到（天御、樂啟都匯这类）。用 house730 自己的坐标落点，
+    再用 SRPE 的官方索引补中文名和地址。
+    """
+    if miss is None or miss.empty:
+        return 0
+    srpe = None
+    if SRPE_INDEX.exists():
+        try:
+            srpe = pd.read_csv(SRPE_INDEX, dtype={"devId": str})
+            srpe["lat"] = pd.to_numeric(srpe.lat, errors="coerce")
+            srpe["lon"] = pd.to_numeric(srpe.lon, errors="coerce")
+            srpe = srpe[srpe.lat.notna()]
+        except Exception:               # noqa: BLE001
+            srpe = None
+    n = 0
+    for i, r in miss.iterrows():
+        lat, lon = pd.to_numeric(r.get("lat"), errors="coerce"), pd.to_numeric(r.get("lon"), errors="coerce")
+        if pd.isna(lat) or pd.isna(lon):
+            continue
+        name_zh, addr_zh, dev_ids = "", "", []
+        if srpe is not None:
+            d = haversine(lat, lon, srpe.lat.values, srpe.lon.values)
+            near = srpe[(d <= 250)]
+            keys = name_keys(str(r.get("project") or "")) | {
+                k for nm in str(r.get("phase_names") or "").split("|") for k in name_keys(nm)}
+            hit = near[near.name_en.fillna("").map(lambda x: bool(name_keys(x) & keys))]
+            if len(hit) == 0 and len(near):
+                ak = addr_key(r.get("address"))
+                hit = near[near.address_en.fillna("").map(lambda x: addr_key(x) == ak)] if ak else near.iloc[0:0]
+            if len(hit):
+                name_zh = str(hit.iloc[0].name_zh or "")
+                addr_zh = str(hit.iloc[0].address_zh or "")
+                dev_ids = [str(x) for x in hit.devId]
+        def _i(v):
+            v = pd.to_numeric(v, errors="coerce")
+            return 0 if pd.isna(v) else int(v)
+        total, sold, rem = _i(r.get("total_units")), _i(r.get("sold_units")), _i(r.get("remaining_units"))
+        _fs = r.get("first_sales_date")
+        fs = "" if pd.isna(_fs) else str(_fs)
+        sites.append({
+            "id": f"h{i}", "lat": round(float(lat), 6), "lon": round(float(lon), 6),
+            "stage": "现楼在售", "status": "在售" if rem > 0 else "已售罄·已入伙",
+            "name": name_zh or str(r.get("project") or ""), "name_en": str(r.get("project") or ""),
+            "phases": [], "address": addr_zh or str(r.get("address") or ""),
+            "address_en": str(r.get("address") or ""), "owner": "私人", "vendor": "",
+            "source": "未知", "land": [], "no_presale": True, "srpe_ids": dev_ids,
+            "presale_units": 0, "presale_first": "", "presale_last": "",
+            "plan_ym": "", "start_ym": "", "bd_units": total or None, "bd_sites": 0,
+            "op_ym": "", "op_units": 0, "ap": "", "applicant": str(r.get("main_developer") or ""),
+            "sale": {"projects": [str(r.get("project") or "")], "total": total, "sold": sold,
+                     "remaining": rem, "first_sales": fs if fs not in ("", "nan", "NaT") else ""},
+        })
+        n += 1
+    print(f"  [land_chain] 另补 {n} 个无预售同意书的在售点（现楼销售）")
+    return n
+
+
+def attach_sales(sites: list[dict], house730_csv: Path | None) -> pd.DataFrame | None:
+    """挂 house730 余货并判定销售状态；返回没接到任何地盘的 house730 行。"""
     h = None
     if house730_csv and Path(house730_csv).exists():
         try:
             h = pd.read_csv(house730_csv)
         except Exception as e:      # noqa: BLE001
             print(f"  [land_chain] house730 表读取失败，销售状态按无余货数据处理: {e}")
-    by_name: dict[str, set] = {}
-    by_addr: dict[str, set] = {}
-    if h is not None:
-        for i, r in h.iterrows():
-            for nm in str(r.get("phase_names") or "").split("|") + [str(r.get("project") or "")]:
-                for k in name_keys(nm):
-                    by_name.setdefault(k, set()).add(i)
-            ak = addr_key(r.get("address"))
-            if ak:
-                by_addr.setdefault(ak, set()).add(i)
-    used = set()
     for s in sites:
         s["sale"] = None
-        if not s["stage"].startswith("已预售"):
-            continue
-        hits = set()
-        for ph in s.get("phases", []):
-            for k in name_keys(ph.get("name_en") or ""):
-                hits |= by_name.get(k, set())
-        for k in name_keys(s.get("name_en")):
-            hits |= by_name.get(k, set())
-        ak = addr_key(s.get("address_en"))
-        if ak:
-            hits |= by_addr.get(ak, set())
-        if hits:
-            sub = h.loc[sorted(hits)]
-            used |= hits
-            s["sale"] = {
-                "projects": [str(x) for x in sub.project],
-                "total": int(pd.to_numeric(sub.total_units, errors="coerce").fillna(0).sum()),
-                "sold": int(pd.to_numeric(sub.sold_units, errors="coerce").fillna(0).sum()),
-                "remaining": int(pd.to_numeric(sub.remaining_units, errors="coerce").fillna(0).sum()),
-                "first_sales": str(sub.first_sales_date.min()) if "first_sales_date" in sub else "",
-            }
-    # 销售状态
+    used = _match_house730(sites, h) if h is not None else set()
+
     recent = (pd.Timestamp.now(tz=HKT) - pd.DateOffset(months=24)).strftime("%Y-%m")
     for s in sites:
         st = s["stage"]
@@ -866,10 +984,12 @@ def attach_sales(sites: list[dict], house730_csv: Path | None) -> None:
             s["status"] = "已批预售·未开售"
         else:
             s["status"] = "已售罄·已入伙"
-    if h is not None:
-        miss = h.loc[[i for i in range(len(h)) if i not in used]]
-        print(f"  [land_chain] house730 {len(h)} 个在售项目，{len(used)} 个接到地盘；未接上: "
-              + "; ".join(str(x) for x in miss.project.head(12)) + (" …" if len(miss) > 12 else ""))
+    if h is None:
+        return None
+    miss = h.loc[[i for i in range(len(h)) if i not in used]].copy()
+    print(f"  [land_chain] house730 {len(h)} 个在售项目，{len(used)} 个接到地盘；"
+          f"未接上 {len(miss)} 个（余货 {int(pd.to_numeric(miss.remaining_units, errors='coerce').fillna(0).sum()):,} 伙）")
+    return miss
 
 
 # ----------------------------------------------------------------------------
@@ -906,7 +1026,8 @@ def main() -> int:
                 df.to_pickle(cache / f"{k}.pkl")
 
     data = build(raw)
-    attach_sales(data["sites"], Path(args.house730) if args.house730 else None)
+    miss = attach_sales(data["sites"], Path(args.house730) if args.house730 else None)
+    add_unmatched_sales(data["sites"], miss)
     st = Counter(); su = Counter()
     for x in data["sites"]:
         st[x["status"]] += 1
