@@ -225,6 +225,14 @@ def clean_xy(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def parse_bids(x) -> list:
+    """「(1) $1,610,000,000<br/>(2) $1,083,918,346」→ [1610.0, 1083.9]（百万）。"""
+    if not isinstance(x, str) or "$" not in x:
+        return []
+    v = [int(m.replace(",", "")) for m in re.findall(r"\$\s?([\d,]{7,})", x)]
+    return [round(a / 1e6, 1) for a in sorted(set(v), reverse=True)]
+
+
 def to_num(x):
     return pd.to_numeric(pd.Series(x).astype(str).str.replace(r"<br\s*/?>.*", "", regex=True)
                          .str.replace(",", "").str.extract(r"(-?\d+\.?\d*)")[0], errors="coerce")
@@ -456,11 +464,21 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
     ls = raw["landsale"].rename(columns={
         "NAME_EN": "lot", "ADDRESS_EN": "address", "SEARCH03_EN": "disposal", "NSEARCH01_EN": "date",
         "NSEARCH02_EN": "use", "NSEARCH03_EN": "area", "NSEARCH04_EN": "premium_m",
-        "NSEARCH06_EN": "party", "LATITUDE": "lat", "LONGITUDE": "lon"})
+        "NSEARCH05_EN": "n_tender", "NSEARCH06_EN": "party", "NSEARCH07_EN": "others",
+        "NSEARCH08_EN": "underbids", "NSEARCH09_EN": "remark",
+        "LATITUDE": "lat", "LONGITUDE": "lon"})
     ls = ls[ls.use.astype(str).str.contains("RESIDENTIAL", case=False)].copy()
     ls["kind"] = "卖地(" + ls.disposal.astype(str).str.title().str.replace("Letter A/B", "換地權益書") + ")"
     ls["premium_m"] = to_num(ls.premium_m)
     ls["area"] = to_num(ls.area)
+    # NSEARCH05 收到几份标书；NSEARCH08 是「落标价」——降序、不含中标价，条数 = 投标数 - 1，
+    # 地政总署 2018/19 财年起才公布，之前只公布成交价。NSEARCH07 是落标公司名单（不配对金额）。
+    ls["n_tender"] = to_num(ls.n_tender)
+    ls["underbids_m"] = ls.underbids.map(parse_bids)
+    ls["others"] = ls.others.fillna("").astype(str).str.replace(r"<br\s*/?>", "; ", regex=True)
+    ls.loc[ls.others.str.fullmatch(r"(?i)\s*(n\.a\.|nan)?\s*"), "others"] = ""
+    ls["remark"] = ls.remark.fillna("").astype(str).str.replace(r"<br\s*/?>", "; ", regex=True)
+    ls.loc[ls.remark.str.fullmatch(r"(?i)\s*(n\.a\.|nan)?\s*"), "remark"] = ""
 
     def _lease(df, kind, area_col=None):
         df = df.rename(columns={"NAME_EN": "lot", "ADDRESS_EN": "address", "NSEARCH01_EN": "date",
@@ -475,6 +493,10 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
         df["kind"] = kind
         df["premium_m"] = to_num(df.premium) / 1e6
         df["party"] = ""
+        df["n_tender"] = np.nan
+        df["underbids_m"] = [[] for _ in range(len(df))]
+        df["others"] = ""
+        df["remark"] = ""
         return df
 
     land = pd.concat([
@@ -667,6 +689,9 @@ def build(raw: dict[str, pd.DataFrame]) -> dict:
                 "lot": str(r.lot)[:80], "use": r.use[:60],
                 "premium_m": None if pd.isna(r.premium_m) else round(float(r.premium_m), 1),
                 "area": None if pd.isna(r.area) else int(r.area), "party": r.party[:80],
+                "n_tender": None if pd.isna(r.n_tender) else int(r.n_tender),
+                "underbids_m": list(r.underbids_m) if isinstance(r.underbids_m, list) else [],
+                "others": (r.others or "")[:600], "remark": (r.remark or "")[:120],
             })
         return recs
 
@@ -1189,6 +1214,299 @@ def attach_srpe_projects(sites: list[dict]) -> int:
     return n
 
 
+URA_DIR = Path(__file__).resolve().parent / "data" / "ura"
+
+_STREET_NAME = re.compile(
+    r"\b([A-Z][A-Z'’]*(?:\s[A-Z][A-Z'’]*){0,3}\s"
+    r"(?:ROAD|STREET|LANE|AVENUE|PATH|TERRACE|DRIVE|WAY|CIRCUIT|CRESCENT|SQUARE|"
+    r"GARDENS?|PLACE|HILL|BAY|PRAYA|COURT|VILLAS?))\b")
+
+
+def street_set(text) -> frozenset:
+    """一段地址里出现的街名。市建局项目多数只写街口（「鴻福街／銀漢街」），没有门牌，
+    所以门牌区间那一套对不上，得靠街名集合。
+
+    逗号 / 斜杠 / 顿号先切开再认：不切的话「Wan Chai, Hong Kong」会被连成一条
+    「CHAI HONG KONG THE AVENUE」那样的假街名，凭空制造重合。
+    """
+    out = set()
+    for seg in re.split(r"[,;/、，；]+|\band\b", str(text or ""), flags=re.I):
+        for m in _STREET_NAME.finditer(_addr_norm(seg)):
+            out.add(re.sub(r"\s+", " ", m.group(1)).strip())
+    return frozenset(out)
+
+
+def _ura_stage(status: str) -> str:
+    """市建局项目页的「Project Status」大致对应链上的哪一档。"""
+    t = (status or "").lower()
+    if "completed" in t and "demolition" not in t and "acquisition" not in t:
+        return "已入伙·未预售"
+    if "construction works in progress" in t or "superstructure" in t:
+        return "动工未预售"
+    return "批地未动工"
+
+
+def attach_ura(sites: list[dict]) -> int:
+    """把市建局自己公布的重建项目和招标结果接到链上。
+
+    市建局的地不经地政总署卖地库：它收楼、清场，土地复归政府后再批回市建局，
+    CSDI 的卖地 / 换地 / 契约修订三个图层里一笔都查不到。land_chain 原本只能靠
+    预售同意书的卖方认出市建局盘，所以已招标、在建但还没批预售的项目整个不在图上，
+    已经在图上的也看不到当年招标卖了多少钱、几家投。
+
+    ura_projects.py 抓的是市建局官网：项目页给坐标 / 地址 / 楼面 / 进展，
+    招标新闻稿给中标公司 + 母公司 + 中标价 + 收到几份标书 + 落标价明细。
+
+    对法：项目页的地址是完整门牌区间，先按街名 + 门牌区间重叠对（和 SRPE 那套同一组
+    工具），对不上再退到 250 米内、卖方已认定是市建局的地盘。都对不上又确实招过标的，
+    单独落一个点。
+    """
+    fp, ft = URA_DIR / "projects.csv", URA_DIR / "tenders.csv"
+    if not fp.exists():
+        return 0
+    proj = pd.read_csv(fp)
+    proj["lat"] = pd.to_numeric(proj.lat, errors="coerce")
+    proj["lon"] = pd.to_numeric(proj.lon, errors="coerce")
+    proj = proj[proj.lat.notna()].reset_index(drop=True)
+
+    tend = pd.read_csv(ft) if ft.exists() else pd.DataFrame()
+    by_slug: dict[str, dict] = {}
+    for r in tend.to_dict("records"):
+        try:
+            ub = json.loads(r.get("underbids_m") or "[]")
+        except Exception:               # noqa: BLE001
+            ub = []
+        rec = {
+            "date": "" if pd.isna(r.get("award_date")) else str(r["award_date"]),
+            "winner": "" if pd.isna(r.get("winner")) else str(r["winner"]),
+            "parent": "" if pd.isna(r.get("parent")) else str(r["parent"]),
+            "amount_m": None if pd.isna(r.get("amount_m")) else round(float(r["amount_m"]), 1),
+            "n_tender": None if pd.isna(r.get("n_tender")) else int(r["n_tender"]),
+            "underbids_m": ub,
+            "url": "" if pd.isna(r.get("award_url")) else str(r["award_url"]),
+            "joint": len(str(r.get("projects") or "").split(";")),
+        }
+        for slug in str(r.get("projects") or "").split(";"):
+            if slug:
+                by_slug[slug] = rec
+
+    site_spans = [addr_spans(s.get("address_en") or s.get("address")) for s in sites]
+    # 屋宇署 / 土地记录落的点没有 address_en，门牌只存在 name 里，漏了它街名集合就是空的，
+    # 该点就永远只能落到最弱的「坐标+卖方」那一档，把街名对得上的项目挤走
+    site_streets = [street_set(" ".join(str(s.get(k) or "") for k in
+                                        ("address_en", "address", "name_en", "name")))
+                    for s in sites]
+    lat = np.array([s["lat"] for s in sites])
+    lon = np.array([s["lon"] for s in sites])
+
+    # 先把所有「项目 × 地盘」的候选和证据强度算出来，再按强度全局分配。
+    # 不能边扫边占：市建局在土瓜湾有八个相邻项目，谁先扫到谁占坑的话，
+    # 弱证据（只是坐标近）会抢走强证据（街名对得上）该配的地盘。
+    presale_units = [s.get("presale_units") or 0 for s in sites]
+    cand = []
+    for k, r in enumerate(proj.itertuples()):
+        spans, streets = addr_spans(r.address), street_set(r.address)
+        units = None if pd.isna(getattr(r, "units", np.nan)) else float(r.units)
+        d = haversine(r.lat, r.lon, lat, lon)
+        for i in np.where(d <= 400)[0]:
+            same = streets & site_streets[i]
+            # 两边都写得出街名却一条都不重合 → 不是同一块地，再近也不认
+            if streets and site_streets[i] and not same:
+                continue
+            if spans and site_spans[i] and addr_overlap(spans, site_spans[i]):
+                sc, w = 4.0, "门牌区间"
+            elif len(same) >= 2:
+                sc, w = 3.0, "街口两条街都对上"
+            elif same and d[i] <= 250:
+                sc, w = 2.0, "同街"
+            elif sites[i].get("owner") == "市建局" and d[i] <= 60:
+                sc, w = 1.0, "坐标+卖方为市建局"
+            else:
+                continue
+            # 市建局项目页的规划伙数和预售同意书批出的伙数都是官方数字，
+            # 对得上比距离近得多的一条街说明力强：同一条街上隔一两百米就有另一个市建局项目，
+            # 光比距离会把 439 伙的盘配给旁边 0 伙的地块
+            if units and presale_units[i]:
+                gap = abs(units - presale_units[i]) / max(units, presale_units[i])
+                if gap <= 0.15:
+                    sc, w = sc + 2, w + "·伙数吻合"
+                elif gap > 0.3:
+                    sc -= 1.5
+            cand.append((sc, -d[i], k, i, w, d[i]))
+    cand.sort(reverse=True)
+    take: dict[int, tuple] = {}
+    used = set()
+    for sc, _, k, i, w, dist in cand:
+        if k in take or i in used:
+            continue
+        take[k] = (i, w, dist)
+        used.add(i)
+
+    n_attach, n_new = 0, 0
+    ura_review: list[dict] = []
+    for k, r in enumerate(proj.itertuples()):
+        best = take.get(k)
+        t = by_slug.get(r.slug)
+        info = {
+            "slug": str(r.slug), "code": "" if pd.isna(r.code) else str(r.code),
+            "name": ("" if pd.isna(r.name_zh) else str(r.name_zh)) or str(r.name_en),
+            "name_en": str(r.name_en), "url": str(r.url),
+            "gfa": None if pd.isna(r.gfa_total) else int(r.gfa_total),
+            "gfa_resi": None if pd.isna(r.gfa_resi) else int(r.gfa_resi),
+            "units": None if pd.isna(getattr(r, "units", np.nan)) else int(r.units),
+            "site_area": None if pd.isna(r.site_area) else int(r.site_area),
+            "programme": "" if pd.isna(r.programme) else str(r.programme)[:120],
+            "status": "" if pd.isna(r.status) else str(r.status)[:200],
+        }
+        if t:
+            info["tender"] = t
+        if best is not None:
+            i, why, best_d = best
+            # 隔了一段距离、规划伙数又和预售批出对不上的，多半不是同一个盘：
+            # 按既有做法先不进记录，单独放 review
+            pu = sites[i].get("presale_units") or 0
+            far = best_d > 150 and info.get("units") and pu and \
+                abs(info["units"] - pu) / max(info["units"], pu) > 0.3
+            if far:
+                ura_review.append({**info, "site": sites[i]["name"], "site_id": sites[i]["id"],
+                                   "dist_m": int(best_d), "match": why,
+                                   "problems": [f"相距 {int(best_d)} 米，规划 {info['units']} 伙 vs 预售批出 {pu} 伙"]})
+                best = None
+            else:
+                sites[i].setdefault("ura", []).append({**info, "match": why, "dist_m": int(best_d)})
+                if sites[i].get("owner") == "私人":
+                    sites[i]["owner"] = "市建局"
+                    sites[i]["source"] = "市建局"
+                n_attach += 1
+        if best is None and t:
+            # 招过标、但链上还没有任何记录：单独落点，否则近几年的市建局项目整个看不见
+            n_new += 1
+            sites.append({
+                "id": f"u{n_new}", "lat": round(float(r.lat), 6), "lon": round(float(r.lon), 6),
+                "stage": _ura_stage(info["status"]),
+                "status": {"动工未预售": "已动工·未预售", "已入伙·未预售": "已入伙·未预售"}.get(
+                    _ura_stage(info["status"]), "市建局已批出·未开上盖"),
+                "name": info["name"], "name_en": info["name_en"], "phases": [],
+                "address": str(r.address), "address_en": str(r.address),
+                "owner": "市建局", "vendor": "", "source": "市建局", "land": [],
+                "presale_units": 0, "presale_first": "", "presale_last": "",
+                "plan_ym": "", "start_ym": "", "bd_units": None, "bd_sites": 0,
+                "op_ym": "", "op_units": 0, "ap": "", "applicant": t.get("parent") or t.get("winner") or "",
+                "area": info["site_area"], "premium_m": t.get("amount_m"),
+                "ura": [info],
+            })
+    print(f"  [land_chain] 市建局：{len(proj)} 个项目，接上 {n_attach} 个地盘，另补 {n_new} 个只有招标记录的点"
+          + (f"，{len(ura_review)} 个存疑待复核" if ura_review else ""))
+    return ura_review
+
+
+CONSENT_PENDING = Path(__file__).resolve().parent / "data" / "consent" / "pending.csv"
+
+
+def attach_consent(sites: list[dict]) -> int:
+    """接地政总署同意方案月报里「待批的预售申请」。
+
+    CSDI 的 LAO_PCRD 只有已批出的同意书，链上分不出「还没申请」和「申请了在排队」。
+    月报 t2 是截至月底所有待批申请的快照，带地段号、地址、发展项目名、伙数、预计落成日。
+    申请阶段的项目名常常还是「Pending」（未定名），所以只能靠地段号对，对不上再用门牌地址。
+    """
+    if not CONSENT_PENDING.exists():
+        return 0
+    try:
+        df = pd.read_csv(CONSENT_PENDING)
+    except Exception:                   # noqa: BLE001
+        return 0
+    if df.empty:
+        return 0
+    by_lot: dict[str, list[dict]] = {}
+    by_addr: dict[str, list[dict]] = {}
+    for r in df.to_dict("records"):
+        rec = {
+            "lot": str(r.get("lot") or ""), "address": str(r.get("address") or ""),
+            "development": str(r.get("development") or ""), "vendor": str(r.get("vendor") or ""),
+            "units": None if pd.isna(r.get("units")) else int(r["units"]),
+            "est_completion": str(r.get("est_completion") or ""), "ym": str(r.get("ym") or ""),
+        }
+        for k in canon_lots(rec["lot"]):
+            by_lot.setdefault(k, []).append(rec)
+        ak = addr_key(rec["address"])
+        if ak and "pending" not in rec["address"].lower():
+            by_addr.setdefault(ak, []).append(rec)
+
+    n = 0
+    for st in sites:
+        hits, how = [], ""
+        lots = {r["lot"] for r in st.get("land", [])}
+        keys = set()
+        for t in list(lots) + [st.get("name_en", ""), st.get("address_en", "")]:
+            keys |= canon_lots(t)
+        for k in keys:
+            for rec in by_lot.get(k, []):
+                if rec not in hits:
+                    hits.append(rec)
+                    how = "地段号"
+        if not hits:
+            ak = addr_key(st.get("address_en") or st.get("address"))
+            if ak:
+                hits = list(by_addr.get(ak, []))
+                how = "门牌地址" if hits else ""
+        if hits:
+            st["consent_pending"] = [{**h, "match": how} for h in hits]
+            n += 1
+    print(f"  [land_chain] 待批预售申请 {len(df)} 条 -> 对上 {n} 个地盘")
+    return n
+
+
+def classify(sites: list[dict]) -> None:
+    """把「状态」拆成三个互不干扰的维度，各自可以单独筛。
+
+    以前只有一个 status，把预售、销售、工程挤在一条轴上（「已批预售·未开售」
+    「政府已卖地·未开上盖」…），既说不清一个盘到底在哪一步，加一档就得在缝里塞一项。
+
+      预售状态  未申请 / 已申请（在月报待批名单里）/ 已批准（有预售同意书）
+      销售状态  未售（还没推出市场）/ 在售（有余货）/ 售罄（卖过或已完工，现在市面上没有）
+      建设状态  未开工（屋宇署无上盖施工同意书）/ 在建 / 已入伙（有入伙纸）
+    """
+    recent = (pd.Timestamp.now(tz=HKT) - pd.DateOffset(months=24)).strftime("%Y-%m")
+    for s in sites:
+        if s.get("presale_units") or s.get("presale_first"):
+            s["f_presale"] = "已批准"
+        elif s.get("consent_pending"):
+            s["f_presale"] = "已申请"
+        else:
+            s["f_presale"] = "未申请"
+
+        # 屋宇署的施工同意书 / 入伙纸月报从 2011-06 才有，更早开工的盘一条记录都没有；
+        # 现楼盘建成才卖，本来就不会出现在「动工未预售」里。这两类按已知事实补，
+        # 并标 f_build_from = "推断"，免得当成屋宇署真有记录
+        s["f_build_from"] = "记录"
+        if s.get("op_ym"):
+            s["f_build"] = "已入伙"
+        elif s.get("start_ym") or s.get("stage") == "动工未预售":
+            s["f_build"] = "在建"
+        elif s.get("stage") == "现楼在售":
+            s["f_build"], s["f_build_from"] = "已入伙", "推断"   # 现楼销售即已落成
+        elif s["f_presale"] == "已批准":
+            old_presale = s.get("presale_first", "") < (
+                pd.Timestamp.now(tz=HKT) - pd.DateOffset(years=4)).strftime("%Y-%m")
+            s["f_build"] = "已入伙" if old_presale else "在建"   # 批了预售必然已动工
+            s["f_build_from"] = "推断"
+        else:
+            s["f_build"] = "未开工"
+
+        sale = s.get("sale")
+        if sale and sale.get("remaining", 0) > 0:
+            s["f_sale"] = "在售"
+        elif sale:
+            s["f_sale"] = "售罄"
+        elif s["f_presale"] == "已批准" and s.get("presale_first", "") < recent:
+            s["f_sale"] = "售罄"        # 早年批的预售，现在任何在售名单里都没有 —— 已经不在市面
+        elif s["f_build"] == "已入伙" and s["f_presale"] == "未申请":
+            s["f_sale"] = "售罄"        # 现楼建成、从未申请预售，也不在在售名单里
+        else:
+            s["f_sale"] = "未售"
+
+
 def build_packages(sites: list[dict]) -> None:
     """把 SRPE 的子期归并成「项目」这一层。
 
@@ -1346,11 +1664,17 @@ def main() -> int:
     miss = attach_sales(data["sites"], Path(args.house730) if args.house730 else None)
     add_unmatched_sales(data["sites"], miss)
     attach_srpe_projects(data["sites"])
+    data["review"] += attach_ura(data["sites"])
+    attach_consent(data["sites"])
+    classify(data["sites"])
     st = Counter(); su = Counter()
     for x in data["sites"]:
         st[x["status"]] += 1
         su[x["status"]] += x["presale_units"] or x["bd_units"] or 0
     data["summary"]["by_status"] = [{"status": k, "sites": st[k], "units": su[k]} for k in st]
+    for dim, key in (("by_presale", "f_presale"), ("by_sale", "f_sale"), ("by_build", "f_build")):
+        c = Counter(x[key] for x in data["sites"])
+        data["summary"][dim] = [{"k": k, "sites": v} for k, v in c.most_common()]
     out = Path(args.out)
     write_json(data, out)
     s = data["summary"]

@@ -132,6 +132,38 @@ def _refresh_srpe() -> None:
         print(f"[run_daily] SRPE 同步失败（沿用上次数据）: {e}")
 
 
+URA_SCRIPT = PROJECT_DIR / "ura_projects.py"
+CONSENT_SCRIPT = PROJECT_DIR / "presale_consent.py"
+
+
+def _refresh_ura() -> None:
+    """市建局重建项目与招标记录。一天只抓一次（--max-age-hours 20）：
+    项目页几乎不变，一天四轮全抓是白刷人家网站。
+
+    失败不影响其他步骤——data/ura/ 里仍是上次的结果。
+    """
+    import subprocess
+
+    try:
+        subprocess.run([sys.executable, str(URA_SCRIPT), "--out", "data/ura", "--max-age-hours", "20"],
+                       check=True, cwd=str(PROJECT_DIR))
+        print("[run_daily] 市建局项目 / 招标记录已更新")
+    except Exception as e:
+        print(f"[run_daily] 市建局抓取失败（沿用上次数据）: {e}")
+
+
+def _refresh_consent() -> None:
+    """地政总署同意方案月报（待批的预售申请）。月报一个月一张，同样一天只跑一次。"""
+    import subprocess
+
+    try:
+        subprocess.run([sys.executable, str(CONSENT_SCRIPT), "--out", "data/consent"],
+                       check=True, cwd=str(PROJECT_DIR))
+        print("[run_daily] 预售申请月报已更新")
+    except Exception as e:
+        print(f"[run_daily] 预售申请月报失败（沿用上次数据）: {e}")
+
+
 def _regenerate_chart_from_output() -> None:
     """生成交互式 HTML 看板（ECharts），供 GitHub Pages 网页版查看。（已停用研报 PDF/PNG）"""
     sys.path.insert(0, str(PROJECT_DIR))
@@ -166,6 +198,8 @@ def main() -> int:
         sys.argv = old_argv
 
     _refresh_house730()
+    _refresh_ura()          # land_chain 会读 data/ura，先抓
+    _refresh_consent()      # 同上，data/consent
     _refresh_land_chain()
     _refresh_srpe()
     _regenerate_chart_from_output()
