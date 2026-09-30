@@ -153,12 +153,15 @@ def _refresh_ura() -> None:
 
 
 def _refresh_consent() -> None:
-    """地政总署同意方案月报（待批的预售申请）。月报一个月一张，同样一天只跑一次。"""
+    """地政总署同意方案月报（待批的预售申请）。月报一个月一张，同样一天只跑一次。
+
+    失败不影响其他步骤——data/consent/ 里仍是上次的结果。
+    """
     import subprocess
 
     try:
-        subprocess.run([sys.executable, str(CONSENT_SCRIPT), "--out", "data/consent"],
-                       check=True, cwd=str(PROJECT_DIR))
+        subprocess.run([sys.executable, str(CONSENT_SCRIPT), "--out", "data/consent",
+                        "--max-age-hours", "20"], check=True, cwd=str(PROJECT_DIR))
         print("[run_daily] 预售申请月报已更新")
     except Exception as e:
         print(f"[run_daily] 预售申请月报失败（沿用上次数据）: {e}")

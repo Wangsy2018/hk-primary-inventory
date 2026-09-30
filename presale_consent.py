@@ -199,7 +199,19 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="地政总署同意方案月报（预售申请进度）")
     ap.add_argument("--out", default="data/consent")
     ap.add_argument("--ym", default="", help="指定月份 YYMM，默认自动找最新")
+    ap.add_argument("--max-age-hours", type=float, default=0,
+                    help="产出比这个新就跳过。月报一个月一张，没必要一天下四次")
     a = ap.parse_args()
+    stamp = Path(a.out) / "fetched_at.txt"
+    # 同 ura_projects：时间戳落在仓库里，看 mtime 在 CI 里永远是「刚刚」
+    if a.max_age_hours and not a.ym and stamp.exists():
+        try:
+            age = (pd.Timestamp.utcnow() - pd.Timestamp(stamp.read_text().strip())).total_seconds() / 3600
+        except Exception:               # noqa: BLE001
+            age = None
+        if age is not None and 0 <= age < a.max_age_hours:
+            print(f"[consent] {age:.1f} 小时前跑过，跳过", file=sys.stderr)
+            return 0
     s = _session()
     if a.ym:
         ym, t2 = a.ym, fetch(s, "t2", a.ym)
@@ -223,6 +235,7 @@ def main() -> int:
         df.insert(0, "ym", f"20{ym[:2]}-{ym[2:]}")
         df.to_csv(out / f"{label}.csv", index=False)
         total[label] = len(df)
+    stamp.write_text(pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")
     print(f"[consent] {ym} 月报：" + "、".join(f"{k} {v} 条" for k, v in total.items()), file=sys.stderr)
     return 0
 

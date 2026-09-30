@@ -325,15 +325,22 @@ def main() -> None:
                     help="产出比这个新就跳过（给 run_daily 用，避免一天抓 4 次）")
     a = ap.parse_args()
     out = Path(a.out)
-    if a.max_age_hours and (out / "projects.csv").exists():
-        age = (time.time() - (out / "projects.csv").stat().st_mtime) / 3600
-        if age < a.max_age_hours:
+    stamp = out / "fetched_at.txt"
+    # 时间戳要落在仓库里，不能看文件的 mtime：GitHub Actions 每轮都是全新 checkout，
+    # mtime 永远是「刚刚」，按 mtime 判断等于每轮都跳过，数据再也不会刷新
+    if a.max_age_hours and stamp.exists():
+        try:
+            age = (pd.Timestamp.utcnow() - pd.Timestamp(stamp.read_text().strip())).total_seconds() / 3600
+        except Exception:               # noqa: BLE001
+            age = None
+        if age is not None and 0 <= age < a.max_age_hours:
             print(f"[ura] {age:.1f} 小时前跑过，跳过", file=sys.stderr)
             return
     proj, tend = build(Path(a.cache) if a.cache else None)
     out.mkdir(parents=True, exist_ok=True)
     proj.to_csv(out / "projects.csv", index=False)
     tend.to_csv(out / "tenders.csv", index=False)
+    stamp.write_text(pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")
     print(f"[ura] 项目 {len(proj)} 个 / 招标 {len(tend)} 次 -> {out}", file=sys.stderr)
 
 
