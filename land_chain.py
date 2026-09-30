@@ -1545,6 +1545,57 @@ def attach_consent(sites: list[dict]) -> int:
     return n
 
 
+# 《一手住宅物業銷售條例》2013-04-29 生效，成交记录册从那天起才是法定要求。
+# 更早开卖的盘，条例前成交的单位根本不在册子里——拿册子的成交数去减预售批出的伙数，
+# 会把当年早就卖掉的全算成余货（迎海第 1 期 928 伙只记到 219 宗，凭空多出 709 伙余货）
+SRPO_START = "2013-04"
+
+
+def mark_partial_registers(sites: list[dict]) -> int:
+    """按**每一期自己的**预售批出日期判，不能按整盘最早的那次。
+
+    迎海第 1 期 2012-09 批预售（条例前开卖，册子只记到 219 宗 / 928 伙），
+    但同一个盘的第 3、4 期是 2014、2015 年才批的，册子是全的（1091/1092、485/474）。
+    一竿子按整盘判会把后面这些也当成记不全。每期的预售日期在 site["phases"] 里，
+    伙数和期一一对应，用伙数把期和预售记录接起来。
+    """
+    n = 0
+    for s in sites:
+        by_units: dict[int, list[str]] = {}
+        for ph in (s.get("phases") or []):
+            try:
+                by_units.setdefault(int(ph["units"]), []).append(ph["ym"])
+            except (TypeError, ValueError):
+                continue
+        def _partial(item) -> bool:
+            u = item.get("units")
+            ym = ""
+            if u is not None:
+                hit = by_units.get(int(u), [])
+                if len(hit) == 1:
+                    ym = hit[0]
+            # 对不上就不用整盘的日期兜底：日出康城首期 2011-06 批预售，但它第 XI–XIII 期是
+            # 2019 年后才卖的、册子完整（1872/1880、2171/2172），一按整盘判就把在卖的期也
+            # 当成「记不全」，反而把真余货抹掉。对不上的走下面第二条判据
+            # 只认能精确定位到期的。试过用「已入伙多年 + 册子成交不到批出六成」当旁证，
+            # 但那个判断只有整盘的预售日期可用，会误伤大型屋苑里后来才开卖的期：
+            # 日出康城第 XIII 期（2550 伙售 1200）和愉景灣 19-1 期（490 伙售 3）都被误标，
+            # 而后者 490-3=487 跟 house730 的余 493 几乎一致，说明册子本来就是全的。
+            # 宁可漏标：帝峯．皇殿这种两期合并、伙数对不上单期的会漏，但它已停售，不会显示成在售
+            return bool(ym) and ym < SRPO_START
+
+        for p in (s.get("packages") or []):
+            if p.get("sold") is not None and _partial(p):
+                p["sold_partial"] = True
+                n += 1
+            for x in (p.get("subs") or []):
+                if x.get("sold") is not None and _partial(x):
+                    x["sold_partial"] = True
+    if n:
+        print(f"  [land_chain] {n} 个期开卖早于《一手住宅物業銷售條例》生效，成交册只记条例后的成交，不据此算余货")
+    return n
+
+
 def classify(sites: list[dict]) -> None:
     """把「状态」拆成三个互不干扰的维度，各自可以单独筛。
 
@@ -1755,6 +1806,7 @@ def main() -> int:
     data["review"] += attach_ura(data["sites"])
     attach_consent(data["sites"])
     attach_mtr(data["sites"])
+    mark_partial_registers(data["sites"])
     classify(data["sites"])
     st = Counter(); su = Counter()
     for x in data["sites"]:

@@ -218,10 +218,14 @@ MAP_JS = r"""
         (p.units_partial ? '<br><span style="color:#94a3b8">部分子期未对上预售伙数，批出数偏少</span>' : '') +
         (p.first_print ? '<br><span style="color:#94a3b8">售楼书 ' + esc(p.first_print) + (p.last_pasp ? ' · 最近成交 ' + esc(p.last_pasp) : '') + '</span>' : '') +
         '</td></tr>';
+      if (p.sold_partial) {
+        h += '<tr><td>成交册</td><td style="color:#94a3b8">已售 ' + (p.sold != null ? fmtUnits(p.sold) + ' 宗' : '—') +
+          '（《一手住宅物業銷售條例》2013-04-29 生效前开卖，条例前的成交不在册内，不据此算余货）</td></tr>';
+      }
       if ((p.subs || []).length > 1) {
         h += '<tr><td>子期</td><td>' + p.subs.length + ' 个<details open><summary>' + p.subs.map(function (x) { return esc(x.phase); }).join(' / ') + '</summary>';
         p.subs.forEach(function (x) {
-          var l2 = (x.units != null && x.sold != null) ? Math.max(0, x.units - x.sold) : null;
+          var l2 = (x.units != null && x.sold != null && !x.sold_partial) ? Math.max(0, x.units - x.sold) : null;
           h += '<div>' + esc(x.phase) + ' · ' + (x.units != null ? fmtUnits(x.units) + ' 伙' : '—') +
             (x.sold != null ? ' · 已售 ' + fmtUnits(x.sold) : '') + (l2 ? ' · 余 ' + fmtUnits(l2) : '') +
             (x.active === 'Y' ? '' : ' <span style="color:#94a3b8">(售罄/停售)</span>') + '</div>';
@@ -324,7 +328,7 @@ MAP_JS = r"""
     if ((s.packages || []).length > 1) {
       h += '<tr><td>分期</td><td>共 <b>' + s.packages.length + '</b> 个项目<details><summary>各项目明细</summary>';
       s.packages.forEach(function (p) {
-        var left = (p.units != null && p.sold != null) ? Math.max(0, p.units - p.sold) : null;
+        var left = (p.units != null && p.sold != null && !p.sold_partial) ? Math.max(0, p.units - p.sold) : null;
         h += '<div>' + esc(p.label || p.name) + (p.subs && p.subs.length > 1 ? '（' + p.subs.length + ' 子期）' : '') + ' · ' + (p.units != null ? fmtUnits(p.units) + ' 伙' : '—') +
           (p.sold != null ? ' · 已售 ' + fmtUnits(p.sold) : '') + (left ? ' · 余 ' + fmtUnits(left) : '') +
           (p.active === 'Y' ? '' : ' <span style="color:#94a3b8">(已停售/售罄)</span>') + '</div>';
@@ -381,8 +385,11 @@ MAP_JS = r"""
     var ps = s.packages || [];
     if (!splitOn || ps.length < 2) return [s];
     return ps.map(function (p) {
-      var left = (p.units != null && p.sold != null) ? Math.max(0, p.units - p.sold) : null;
-      var selling = p.active === 'Y' && (left == null || left > 0);
+      // 成交册早于《一手住宅物業銷售條例》生效的期，册子只记了条例后的成交，
+      // 「批出伙数 - 册子成交数」不是余货，不据此算
+      var left = (p.units != null && p.sold != null && !p.sold_partial)
+        ? Math.max(0, p.units - p.sold) : null;
+      var selling = p.active === 'Y' && !p.sold_partial && (left == null || left > 0);
       return Object.assign({}, s, {
         lat: p.lat, lon: p.lon, _proj: p, _parent: s,
         name: (p.name || s.name) + (p.label ? ' ' + p.label : ''),
