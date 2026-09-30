@@ -263,6 +263,17 @@ MAP_JS = r"""
     } else {
       h += '<tr><td>批地</td><td style="color:#94a3b8">地政总署卖地 / 换地 / 契约修订库中无记录</td></tr>';
     }
+    (s.mtr || []).forEach(function (m) {
+      var t = '<b>' + esc(m.name || m.station) + '</b>' +
+        (m.station && m.name && m.station !== m.name ? ' <span style="color:#94a3b8">' + esc(m.station) + '</span>' : '');
+      if (m.award_ym) t += '<br>招标批出 ' + esc(m.award_ym);
+      if (m.gfa) t += (m.award_ym ? ' · ' : '<br>') + '楼面 ' + fmtUnits(m.gfa) + ' ㎡';
+      if (m.site_ha) t += (m.award_ym ? ' · ' : '<br>') + '地盘 ' + m.site_ha + ' 公顷';
+      if (m.developer) t += '<br><span style="color:#94a3b8">' + esc(m.developer) + '</span>';
+      if (m.completion) t += '<br><span style="color:#94a3b8">落成 ' + esc(m.completion) + '</span>';
+      t += '<br><span style="color:#94a3b8">港铁不公布招标金额</span>';
+      h += '<tr><td>港铁</td><td>' + t + '</td></tr>';
+    });
     (s.ura || []).forEach(function (u) {
       var t = '<b>' + esc(u.name) + '</b>' + (u.code ? ' <span style="color:#94a3b8">' + esc(u.code) + '</span>' : '');
       if (u.gfa) t += '<br>总楼面 ' + fmtUnits(u.gfa) + ' ㎡' + (u.gfa_resi ? '（住宅 ' + fmtUnits(u.gfa_resi) + ' ㎡）' : '');
@@ -395,7 +406,7 @@ MAP_JS = r"""
       var u = s.presale_units || s.bd_units || 0;
       if (f.min && u < f.min) return;
       if (f.q) {
-        var hay = (s.name + ' ' + s.name_en + ' ' + s.address + ' ' + (s.land || []).map(function (r) { return r.lot; }).join(' ') + ' ' + (s.ura || []).map(function (u) { return u.name + ' ' + u.name_en + ' ' + u.code; }).join(' ')).toLowerCase();
+        var hay = (s.name + ' ' + s.name_en + ' ' + s.address + ' ' + (s.land || []).map(function (r) { return r.lot; }).join(' ') + ' ' + (s.ura || []).map(function (u) { return u.name + ' ' + u.name_en + ' ' + u.code; }).join(' ') + ' ' + (s.mtr || []).map(function (m) { return m.name + ' ' + m.station + ' ' + m.developer; }).join(' ')).toLowerCase();
         if (hay.indexOf(f.q) < 0) return;
       }
       shown.push(s);

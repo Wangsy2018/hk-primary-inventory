@@ -1400,6 +1400,94 @@ def attach_ura(sites: list[dict]) -> int:
     return ura_review
 
 
+MTR_PACKAGES = Path(__file__).resolve().parent / "data" / "mtr" / "packages.csv"
+
+
+def attach_mtr(sites: list[dict]) -> int:
+    """接港铁年报里的上盖物业发展表。
+
+    港铁的上盖用地随铁路方案批给港铁，不经地政总署卖地库，CSDI 三个土地图层查不到；
+    链上只能靠预售卖方认出港铁盘，看不出是哪一期、哪年招标、给了哪个发展商。
+
+    **港铁不公布招标金额。** 政府卖地和市建局都公布中标价（市建局连落标价都公布），
+    港铁的招标新闻稿只写「已批予某某财团」——上盖是分成 / 实物分配，没有可比的地价。
+    所以这里补的是发展商、招标批出年月、楼面。
+
+    对法：先按项目英文名（年报的 SEASONS PLACE、THE PAVILIA FARM 对预售 / SRPE 的英文名），
+    对不上再按站名（LOHAS Park Station → 日出康城）。站名一条只认一个地盘，多于一个就不认。
+    """
+    if not MTR_PACKAGES.exists():
+        return 0
+    try:
+        df = pd.read_csv(MTR_PACKAGES)
+    except Exception:                   # noqa: BLE001
+        return 0
+    df = df[df.get("type", pd.Series(dtype=str)).fillna("").str.startswith("Residential")
+            | (df.table == "西铁")].copy()
+    if df.empty:
+        return 0
+
+    mtr_sites = [i for i, s in enumerate(sites) if s.get("owner") == "港铁"]
+    def keys_of(i):
+        s = sites[i]
+        ks = name_keys(s.get("name_en") or "") | name_keys(s.get("name") or "")
+        for p in (s.get("packages") or []):
+            ks |= name_keys(p.get("name_en") or "") | name_keys(p.get("name") or "")
+        return ks
+    site_keys = {i: keys_of(i) for i in mtr_sites}
+    site_text = {i: " ".join(str(sites[i].get(k) or "") for k in
+                             ("name", "name_en", "address", "address_en")).upper() for i in mtr_sites}
+
+    n, miss = 0, []
+    for r in df.to_dict("records"):
+        rec = {k: ("" if pd.isna(r.get(k)) else r[k]) for k in
+               ("table", "station", "name", "developer", "type", "award_ym", "completion")}
+        rec["gfa"] = None if pd.isna(r.get("gfa")) else int(r["gfa"])
+        ha = pd.to_numeric(re.sub(r"[^\d.]", "", str(r.get("site_ha") or "")), errors="coerce")
+        rec["site_ha"] = None if pd.isna(ha) else round(float(ha), 2)
+
+        hit, how = None, ""
+        # ① 项目英文名（一行可能写了几个名字，用 / 隔开）
+        nk = set()
+        for part in re.split(r"[/、]", str(rec["name"])):
+            nk |= name_keys(part)
+        if nk:
+            cand = [i for i in mtr_sites if nk & site_keys[i]]
+            if len(cand) == 1:
+                hit, how = cand[0], "项目名"
+        # ② 站名：年报写「LOHAS Park Station」，链上是「日出康城 / LOHAS Park」
+        if hit is None and rec["station"]:
+            raw = str(rec["station"])
+            # 括号里常是这一带的案名（「Wong Chuk Hang Station (THE SOUTHSIDE)」），
+            # 链上用的就是那个名字，所以括号内外都要试
+            alts = [re.sub(r"(?i)\s*(station|stop|property development packages? (awarded|to be awarded))\s*",
+                           " ", x).strip()
+                    for x in ([m.group(1) for m in re.finditer(r"\((.*?)\)", raw)]
+                              + [re.sub(r"\(.*?\)", " ", raw)])]
+            for st in alts:
+                if len(st) < 4:
+                    continue
+                cand = [i for i in mtr_sites if st.upper() in site_text[i]]
+                if len(cand) == 1:
+                    hit, how = cand[0], "站名"
+                    break
+        # ③ 西铁那张表只有站 / 地盘名，拿它去比地盘的名字和地址
+        if hit is None and rec["table"] == "西铁" and rec["name"]:
+            st = re.sub(r"(?i)\s*(package \d+|\(.*?\))\s*", " ", str(rec["name"])).strip()
+            if len(st) >= 4:
+                cand = [i for i in mtr_sites if st.upper() in site_text[i]]
+                if len(cand) == 1:
+                    hit, how = cand[0], "西铁站名"
+        if hit is None:
+            miss.append(f"{rec['station'] or rec['table']}/{rec['name']}"[:40])
+            continue
+        sites[hit].setdefault("mtr", []).append({**rec, "match": how})
+        n += 1
+    print(f"  [land_chain] 港铁年报 {len(df)} 行 -> 接上 {n} 行"
+          + (f"；未对上 {len(miss)}：{'、'.join(miss[:6])}" if miss else ""))
+    return n
+
+
 CONSENT_PENDING = Path(__file__).resolve().parent / "data" / "consent" / "pending.csv"
 
 
@@ -1666,6 +1754,7 @@ def main() -> int:
     attach_srpe_projects(data["sites"])
     data["review"] += attach_ura(data["sites"])
     attach_consent(data["sites"])
+    attach_mtr(data["sites"])
     classify(data["sites"])
     st = Counter(); su = Counter()
     for x in data["sites"]:

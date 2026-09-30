@@ -162,6 +162,7 @@ python chart_dashboard.py
 | `map_section.py` | 「项目地图」独立页 `map.html`（Leaflet + 政府地图瓦片，探测不通自动只用 OpenStreetMap），按销售状态 / 土地来源 / 规模筛选 |
 | `land_chain.py` | 项目地图数据：抓 CSDI 九个图层（预售、卖地、换地、契约修订、地段扩展、屋宇署批则/动工同意/上盖动工通知/OP），按坐标 + 地段号串成「地→楼→售」链，再接 house730 余货定在售 / 售罄，输出 `land_chain.json`。只看 2010 年起、只看私人住宅（房協 / 房委会 / 资助 / 简约 / 过渡房屋全剔）；买家与申请人对不上等可疑匹配放 `review` 不进地图 |
 | `ura_projects.py` | 市建局重建项目与招标：抓 ura.org.hk 的 88 个项目页（坐标 / 地址 / 楼面 / 规划伙数 / 进展，中英文名取自页面 JSON-LD）和招标新闻稿（中标公司 + 母公司 + 中标价 + 标书数 + 全部落标价），输出 `data/ura/{projects,tenders}.csv`。市建局的地不经地政总署卖地库，不补的话已招标未预售的项目整个不在图上 |
+| `mtr_projects.py` | 港铁上盖物业发展项目：从港铁年报的「Hong Kong Property」章节解析三张表（已批出 / 待招标 / 西铁沿线），取站、项目名、发展商、楼面、招标批出日期，输出 `data/mtr/packages.csv`。港铁的地随铁路方案批给它、不经卖地库，且**不公布招标金额** |
 | `presale_consent.py` | 地政总署同意方案月报：下 t1/t2/t3 三张 PDF，按表头 x 坐标切列、按行距分块，取「待批的预售申请」等，输出 `data/consent/{pending,issued,rejected}.csv`。CSDI 只有已批出的同意书，这张表才分得出「没申请」和「在排队」 |
 | `srpe_sync.py` | 一手住宅物業銷售資訊網（SRPE）增量同步：每次只问「过去 2 天成交册有更新的盘」，重下并解析这些盘的成交记录册，改写 `data/srpe/` 里对应几行；PDF 和逐单不进 git |
 | `run_daily.py` | 定时任务入口（对比 + 邮件 + 生成网页看板） |
@@ -638,6 +639,47 @@ PDF 没有表格线，`extract_tables()` 抽不出东西，按表头的字 x 坐
 **建设状态有推断**：屋宇署月报 2011-06 起才有，更早开工的盘一条记录都没有；现楼盘建成才卖，
 本来就不会出现在「动工未预售」里。这两类按已知事实补（现楼 → 已入伙；批了预售必然已动工，
 预售超过 4 年 → 已入伙，否则 → 在建），字段 `f_build_from` 标 `推断`，弹窗里也注明。
+
+### 13. 港铁上盖物业 —— 年报的物业章节
+
+`mtr_projects.py`，产出 `data/mtr/packages.csv`。
+
+港铁的上盖用地随铁路方案批给港铁，地政总署卖地 / 换地 / 契约修订三个库里查不到，
+链上只能靠预售卖方认出港铁盘，看不出是哪一期、哪年招标、给了哪个发展商。
+
+**港铁不公布招标金额。** 政府卖地公布中标价和落标价（§10），市建局连落标金额都另发一篇稿公布（§9），
+港铁的招标新闻稿全文只有一句「招标已批予某某财团」，没有任何数字——上盖是与发展商分成 / 实物分配，
+本来就没有一个可比的地价。验证：[LOHAS Park Package Thirteen 招标批出稿](https://www.mtr.com.hk/archive/corporate/en/press_release/PR-20-071-E.pdf)（2020-10-30）通篇只写中标财团。
+
+所以这里补的是**发展商 + 招标批出年月 + 楼面**，来源是年报而不是逐篇新闻稿——
+年报一年一份 PDF 就覆盖全部项目，比扒几百篇稿干净得多：
+
+  `https://www.mtr.com.hk/archive/corporate/en/investor/annual{年}/E{章}.pdf`
+
+章号每年会挪，脚本按内容找（正文含 `Property Development Packages` 那一章）。三张表：
+
+| 表 | 内容 |
+|---|---|
+| Property Development Packages Completed during the year and awarded | 站 / 项目名 / 发展商 / 类型 / 楼面 / **招标批出日期** / 预计落成 |
+| Property Development Packages to be Awarded | 待招标的储备（楼面、招标期间） |
+| West Rail Line Property Development Plan | 西铁沿线，港铁只作发展代理（地盘面积、招标批出日期） |
+
+**解析要点**：
+- 站名自成一行、用 `MyriadPro-Semibold` 排，**靠字体认标题**最稳——靠「右边几列是空的」会把
+  `SEASONS PLACE / PARK SEASONS / GRAND SEASONS` 这种折行的项目名误判成站名
+- 年报正文是双栏排版，表格只占页面一条横带，**必须按表头 bbox 限 x 范围**，否则下一栏的正文整段混进表里
+- 遇到 `Notes:` / `Total` / 脚注符号就停
+
+**接回地盘**：先按项目英文名（年报的 `THE PAVILIA FARM` 对预售 / SRPE 的英文名），
+对不上再按站名，站名括号里常是案名（`Wong Chuk Hang Station (THE SOUTHSIDE)` → 链上叫 THE SOUTHSIDE），
+括号内外都试；一个名字对上多于一个地盘就不认。27 行接上 11 行，接不上的多是还没进预售链的新项目
+（东涌东站第 1 期 2024-12 批出、屯门 A16 站第 1 期 2025-11 批出）和西铁沿线那几个案名与站名对不上的。
+
+**站点状况（2026-09）**：港铁企业站 `www.mtr.com.hk/en/corporate/*` 长期返回「网站服务暂停」维护页，
+从香港住宅 IP、真浏览器访问都一样，同一 IP 下 `/en/customer/*` 正常——是那一节真的下线，不是被挡。
+`/archive/` 这条静态路径一直可用，走的不是同一套系统，但**对连续请求限速很凶**：
+连扫几百个 URL 后会整段拒绝，且拒绝时返回的就是那个维护页，和真 404 分不开。所以不要枚举新闻稿编号，
+走年报。脚本每份 PDF 之间留 4 秒。
 
 ### 通用：本机代理会挡掉港府站点
 

@@ -133,6 +133,7 @@ def _refresh_srpe() -> None:
 
 
 URA_SCRIPT = PROJECT_DIR / "ura_projects.py"
+MTR_SCRIPT = PROJECT_DIR / "mtr_projects.py"
 CONSENT_SCRIPT = PROJECT_DIR / "presale_consent.py"
 
 
@@ -150,6 +151,22 @@ def _refresh_ura() -> None:
         print("[run_daily] 市建局项目 / 招标记录已更新")
     except Exception as e:
         print(f"[run_daily] 市建局抓取失败（沿用上次数据）: {e}")
+
+
+def _refresh_mtr() -> None:
+    """港铁年报的上盖物业表。年报一年一份，一天跑一次就够；
+    港铁站点对连续请求限速很凶，别加频率。
+
+    失败不影响其他步骤——data/mtr/ 里仍是上次的结果。
+    """
+    import subprocess
+
+    try:
+        subprocess.run([sys.executable, str(MTR_SCRIPT), "--out", "data/mtr",
+                        "--max-age-hours", "20"], check=True, cwd=str(PROJECT_DIR))
+        print("[run_daily] 港铁上盖物业表已更新")
+    except Exception as e:
+        print(f"[run_daily] 港铁年报抓取失败（沿用上次数据）: {e}")
 
 
 def _refresh_consent() -> None:
@@ -203,6 +220,7 @@ def main() -> int:
     _refresh_house730()
     _refresh_ura()          # land_chain 会读 data/ura，先抓
     _refresh_consent()      # 同上，data/consent
+    _refresh_mtr()          # 同上，data/mtr
     _refresh_land_chain()
     _refresh_srpe()
     _regenerate_chart_from_output()
